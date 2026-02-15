@@ -126,3 +126,8 @@
   background: #555;
   box-shadow: none;
 }
+
+.dotNeutral {
+  background: var(--text-tertiary);
+  box-shadow: none;
+}

@@ -324,7 +324,7 @@ export function App() {
         <div className={styles.statusBar}>
           <div className={styles.statusGroup}>
             <div className={styles.statusItem}>
-              <span className={`${styles.dot} ${styles.dotConnected}`} />
+              <span className={`${styles.dot} ${workspace ? styles.dotConnected : styles.dotNeutral}`} />
               <span>Workspace</span>
             </div>
             <div className={styles.statusItem}>

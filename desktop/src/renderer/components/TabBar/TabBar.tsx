@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import {
   TabList,
   Tab as FluentTab,
@@ -82,8 +82,20 @@ export function TabBar() {
     [setActiveTab]
   )
 
+  const tabListRef = useRef<HTMLDivElement>(null)
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    const el = tabListRef.current
+    if (!el) return
+    if (el.scrollWidth > el.clientWidth) {
+      e.preventDefault()
+      el.scrollLeft += e.deltaY
+    }
+  }, [])
+
   return (
     <div className={styles.tabBar}>
+      <div ref={tabListRef} className={styles.tabListScroller} onWheel={handleWheel}>
       <TabList
         selectedValue={activeTabId}
         onTabSelect={handleTabSelect}
@@ -128,6 +140,7 @@ export function TabBar() {
           )
         })}
       </TabList>
+      </div>
 
       <Tooltip
         label="New terminal"

@@ -4,14 +4,22 @@
   display: flex;
   align-items: stretch;
   border-bottom: 1px solid var(--border-muted);
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
   padding-right: var(--window-controls-width-tabbar);
   -webkit-app-region: drag;
 }
 
-.tabBar::-webkit-scrollbar {
-  height: 5px;
+/* ── Scrollable tab list wrapper ── */
+.tabListScroller {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.tabListScroller::-webkit-scrollbar {
+  height: 0;
 }
 
 /* ── Fluent TabList overrides ── */
@@ -19,17 +27,17 @@
   min-width: 0;
   align-items: flex-end;
   padding-left: 2px;
-  -webkit-app-region: no-drag;
 }
 
 /* ── Individual tab (Fluent Tab overrides) ── */
 .tab {
-  min-width: 138px;
-  max-width: 260px;
+  min-width: 80px;
+  max-width: 180px;
   border-radius: var(--borderRadiusLarge) var(--borderRadiusLarge) 0 0;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: 12px;
   -webkit-app-region: no-drag;
+  padding: 0 8px;
 }
 
 /* ── Tab content layout (title + close) ── */
