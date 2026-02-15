@@ -119,21 +119,33 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     })
   }, [defaultCommitPrefix, workspaceId])
 
+  const lastRefreshRef = useRef(0)
+
   const refresh = useCallback(async (showLoading = false) => {
+    // Throttle: skip silent refreshes that arrive too fast
+    const now = Date.now()
+    if (!showLoading && now - lastRefreshRef.current < 1000) return
+
     const seq = ++refreshSeqRef.current
     if (showLoading) setLoading(true)
 
     try {
       const statuses = await window.api.git.getStatus(worktreePath)
       if (seq !== refreshSeqRef.current) return
+      lastRefreshRef.current = Date.now()
       setFiles(statuses)
       dispatchGitStatusChanged(worktreePath, statuses.length)
     } catch {
       if (seq !== refreshSeqRef.current) return
-      setFiles([])
-      dispatchGitStatusChanged(worktreePath, 0)
+      // Only clear files on explicit loading refresh; silent refreshes keep previous state
+      if (showLoading) {
+        setFiles([])
+        dispatchGitStatusChanged(worktreePath, 0)
+      }
     } finally {
-      if (showLoading && seq === refreshSeqRef.current) {
+      // Always clear loading if this is the latest request, regardless of showLoading.
+      // This prevents loading getting stuck when a silent refresh overtakes an initial load.
+      if (seq === refreshSeqRef.current) {
         setLoading(false)
       }
     }
@@ -173,6 +185,8 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
       const msg = formatUserError(err, 'Git operation failed')
       addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
     } finally {
+      // Reset throttle so user-initiated ops always get fresh status
+      lastRefreshRef.current = 0
       await refresh()
       setBusy(false)
     }

@@ -469,13 +469,13 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
         const entry = fsWatchers.get(dirPath)
         if (!entry) return
 
-        // Debounce: wait 500ms of quiet before notifying
+        // Debounce: wait 1000ms of quiet before notifying
         if (entry.timer) clearTimeout(entry.timer)
         entry.timer = setTimeout(() => {
           if (!win.isDestroyed()) {
             win.webContents.send(IPC.FS_WATCH_CHANGED, dirPath)
           }
-        }, 500)
+        }, 1000)
       })
 
       fsWatchers.set(dirPath, { watcher, timer: null })
