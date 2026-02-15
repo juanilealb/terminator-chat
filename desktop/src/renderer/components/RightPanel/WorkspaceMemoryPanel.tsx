@@ -115,6 +115,11 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
         message: `Template "${templateName}" inserted into terminal`,
         type: 'info',
       })
+      // Focus terminal so the user can press Enter immediately
+      setTimeout(() => {
+        const termEl = document.querySelector('[class*="terminalInner"] .xterm textarea') as HTMLElement | null
+        termEl?.focus()
+      }, 100)
     },
     [findTerminalForWorkspace, addToast, workspace]
   )
