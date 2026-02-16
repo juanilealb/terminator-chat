@@ -238,14 +238,29 @@
   flex-shrink: 0;
 }
 
+.dotIdle {
+  background: #555;
+  box-shadow: none;
+}
+
 .dotConnected {
   background: var(--accent-green);
   box-shadow: 0 0 4px rgba(72, 209, 138, 0.35);
 }
 
-.dotIdle {
-  background: #555;
-  box-shadow: none;
+.dotRunning {
+  background: var(--accent-blue);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent-blue) 55%, transparent);
+}
+
+.dotWaiting {
+  background: var(--accent-yellow);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent-yellow) 60%, transparent);
+}
+
+.dotCompleted {
+  background: var(--accent-green);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent-green) 55%, transparent);
 }
 
 .dotNeutral {
