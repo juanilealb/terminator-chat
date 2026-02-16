@@ -806,13 +806,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   // Listen for chat events from main process
   useEffect(() => {
     const unsub = window.api.chat.onEvent((event) => {
-      const { threadId: eventThreadId, type, data } = event
+      const { threadId: eventThreadId, type, phase, data } = event
       const realId = realThreadIdRef.current
       if (!realId || eventThreadId !== realId) return
 
       const typedData = data as Record<string, unknown>
 
-      if (type === 'turn.started') {
+      if (phase === 'turn.started') {
         if (!activeTurnHasItemsRef.current) {
           eventTurnSequenceRef.current += 1
         }
@@ -821,7 +821,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         return
       }
 
-      if (type === 'turn.waiting_input') {
+      if (phase === 'turn.waiting_input') {
         setLoading(false)
         if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
         return
@@ -974,15 +974,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             }
           })
         }
-      } else if (type === 'turn.completed') {
+      } else if (phase === 'turn.completed') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'completed')
-      } else if (type === 'turn.cancelled') {
+      } else if (phase === 'turn.cancelled') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
-      } else if (type === 'turn.failed' || type === 'error') {
+      } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')

@@ -98,6 +98,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatMessages: {},
   codexLoggedIn: false,
   chatThread: null,
+  _fileWatcherRunningIds: new Set<string>(),
+  _fileWatcherWaitingIds: new Set<string>(),
 
   addProject: (project) =>
     set((s) => ({
@@ -942,20 +944,35 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setClaudeActivitySnapshot: (snapshot) =>
     set((s) => {
-      const waitingAgentCount = Object.values(snapshot.waitingAgentsByWorkspace).reduce(
-        (sum, count) => sum + count,
-        0,
+      const fwRunning = new Set(snapshot.runningWorkspaceIds)
+      const fwWaiting = new Set(snapshot.waitingWorkspaceIds)
+      const previousFileWatcherIds = new Set([
+        ...s._fileWatcherRunningIds,
+        ...s._fileWatcherWaitingIds,
+      ])
+
+      // Keep IDs managed by ChatPanel (those not owned by previous file-watcher snapshot).
+      const chatRunning = [...s.activeClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
+      const chatWaiting = [...s.waitingClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
+
+      const mergedWaiting = new Set([...fwWaiting, ...chatWaiting])
+      // Waiting for input has higher UX priority than running.
+      const mergedRunning = new Set(
+        [...fwRunning, ...chatRunning].filter((id) => !mergedWaiting.has(id)),
       )
-      const activeSet = new Set(snapshot.runningWorkspaceIds)
-      const waitingSet = new Set(snapshot.waitingWorkspaceIds)
+
       return {
-        activeClaudeWorkspaceIds: activeSet,
-        waitingClaudeWorkspaceIds: waitingSet,
+        _fileWatcherRunningIds: fwRunning,
+        _fileWatcherWaitingIds: fwWaiting,
+        activeClaudeWorkspaceIds: mergedRunning,
+        waitingClaudeWorkspaceIds: mergedWaiting,
         completedClaudeWorkspaceIds: new Set(
-          Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !activeSet.has(wsId) && !waitingSet.has(wsId)),
+          [...s.completedClaudeWorkspaceIds].filter(
+            (id) => !mergedRunning.has(id) && !mergedWaiting.has(id),
+          ),
         ),
-        runningAgentCount: snapshot.runningAgentCount,
-        waitingAgentCount,
+        runningAgentCount: mergedRunning.size,
+        waitingAgentCount: mergedWaiting.size,
       }
     }),
 
@@ -1128,37 +1145,6 @@ export async function hydrateFromDisk(): Promise<void> {
     // ignore — auth check is best-effort
   }
 
-  // Listen for chat events from Codex service in main process
-  window.api.chat.onEvent((event) => {
-    const store = useAppStore.getState()
-    const { threadId, type, data } = event
-
-    if (type === 'message.completed' && data && typeof data === 'object' && 'content' in data) {
-      const msg = data as { id: string; role: 'assistant'; content: string }
-      store.chatMessages[threadId] // check exists
-      useAppStore.setState((s) => ({
-        chatMessages: {
-          ...s.chatMessages,
-          [threadId]: [
-            ...(s.chatMessages[threadId] ?? []),
-            {
-              id: msg.id ?? crypto.randomUUID(),
-              role: 'assistant',
-              content: msg.content,
-              timestamp: Date.now(),
-            },
-          ],
-        },
-      }))
-    }
-
-    if (type === 'error' && data && typeof data === 'object' && 'message' in data) {
-      store.addToast({
-        id: crypto.randomUUID(),
-        message: `Chat error: ${(data as { message: string }).message}`,
-        type: 'error',
-      })
-    }
-  })
+  // Chat stream events are handled in ChatPanel instances bound to live threads.
+  // Keeping event-to-message mapping local to the panel avoids stale global listeners.
 }
-
