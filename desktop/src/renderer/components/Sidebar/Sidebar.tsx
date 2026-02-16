@@ -2,20 +2,22 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button, Divider } from "@fluentui/react-components";
 import { basenameSafe, formatShortcut, toPosixPath } from "@shared/platform";
 import { SHORTCUT_MAP } from "@shared/shortcuts";
-import { DEFAULT_AGENT_PERMISSION_MODE, type AgentPermissionMode } from "@shared/agent-permissions";
+import { DEFAULT_AGENT_PERMISSION_MODE } from "@shared/agent-permissions";
 import { useAppStore } from "../../store/app-store";
-import { DEFAULT_WORKSPACE_TYPE, type Project, type PrLinkProvider, type WorkspaceType } from "../../store/types";
+import { DEFAULT_WORKSPACE_TYPE, type ChatMessage, type Project, type PrLinkProvider, type ProjectOwnership, type Tab, type WorkspaceType } from "../../store/types";
 import type { CreateWorktreeProgressEvent } from "../../../shared/workspace-creation";
 import type { OpenPrInfo, GithubLookupError } from "../../../shared/github-types";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { AddProjectDialog } from "./AddProjectDialog";
 import { Tooltip } from "../Tooltip/Tooltip";
+import { getPreferredGithubLogin } from "../../utils/github-profile";
 import styles from "./Sidebar.module.css";
 
 const PR_ICON_SIZE = 10;
 const PR_REVIEW_ICON_SIZE = 10;
-const START_TERMINAL_MESSAGE = "Starting terminal...";
+const START_CHAT_MESSAGE = "Starting thread...";
 const MAX_COMMENT_COUNT_DISPLAY = 9;
 const PR_PROVIDER_DOMAINS: Record<PrLinkProvider, string> = {
   github: "github.com",
@@ -104,6 +106,25 @@ function extractPrNumberFromBranch(branch: string): number | null {
   return null;
 }
 
+function normalizeThreadTitle(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+function getThreadDisplayName(
+  tab: Extract<Tab, { type: "chat" }>,
+  workspace: { branch: string; name: string; worktreePath: string },
+  messagesByThread: Record<string, ChatMessage[]>,
+): string {
+  const messages = messagesByThread[tab.threadId] ?? [];
+  const firstUserMessage = messages.find(
+    (message) => message.role === "user" && normalizeThreadTitle(message.content).length > 0,
+  );
+  if (firstUserMessage) return normalizeThreadTitle(firstUserMessage.content);
+
+  const fallbackBranch = workspace.branch || basenameSafe(workspace.worktreePath);
+  return fallbackBranch || workspace.name || "New thread";
+}
+
 function ghStatusHintMessage(error?: GithubLookupError): string | null {
   if (error === "gh_not_installed") return "Install GitHub CLI (gh) to show PR status";
   if (error === "not_authenticated") return "Run \u201Cgh auth login\u201D to show PR status";
@@ -132,6 +153,11 @@ function GhStatusHint({ projectId }: { projectId: string }) {
 interface WorkspaceCreationState {
   requestId: string;
   message: string;
+}
+
+interface AddProjectDraft {
+  repoPath: string;
+  name: string;
 }
 
 function PrStateIcon({ state }: { state: "open" | "merged" | "closed" }) {
@@ -382,17 +408,22 @@ function WindowControls() {
 }
 
 export function Sidebar() {
-  const isWindows = navigator.userAgent.toLowerCase().includes("windows");
   const projects = useAppStore((s) => s.projects);
   const workspaces = useAppStore((s) => s.workspaces);
+  const tabs = useAppStore((s) => s.tabs);
+  const chatMessages = useAppStore((s) => s.chatMessages);
   const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
+  const activeTabId = useAppStore((s) => s.activeTabId);
   const setActiveWorkspace = useAppStore((s) => s.setActiveWorkspace);
   const addProject = useAppStore((s) => s.addProject);
   const addWorkspace = useAppStore((s) => s.addWorkspace);
   const addTab = useAppStore((s) => s.addTab);
+  const removeTab = useAppStore((s) => s.removeTab);
   const addToast = useAppStore((s) => s.addToast);
   const workspaceDialogProjectId = useAppStore((s) => s.workspaceDialogProjectId);
   const openWorkspaceDialog = useAppStore((s) => s.openWorkspaceDialog);
+  const openNewThreadDialog = useAppStore((s) => s.openNewThreadDialog);
+  const setNewThreadDialog = useAppStore((s) => s.setNewThreadDialog);
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
   const updateProject = useAppStore((s) => s.updateProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
@@ -400,7 +431,7 @@ export function Sidebar() {
   const showConfirmDialog = useAppStore((s) => s.showConfirmDialog);
   const dismissConfirmDialog = useAppStore((s) => s.dismissConfirmDialog);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
-  const toggleAutomations = useAppStore((s) => s.toggleAutomations);
+  const setRightPanelMode = useAppStore((s) => s.setRightPanelMode);
   const unreadWorkspaceIds = useAppStore((s) => s.unreadWorkspaceIds);
   const activeClaudeWorkspaceIds = useAppStore((s) => s.activeClaudeWorkspaceIds);
   const waitingClaudeWorkspaceIds = useAppStore((s) => s.waitingClaudeWorkspaceIds);
@@ -408,6 +439,9 @@ export function Sidebar() {
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const setPrStatuses = useAppStore((s) => s.setPrStatuses);
   const setGhAvailability = useAppStore((s) => s.setGhAvailability);
+  const toggleSidebar = useAppStore((s) => s.toggleSidebar);
+  const settings = useAppStore((s) => s.settings);
+  const defaultProjectOwnership = useAppStore((s) => s.settings.defaultProjectOwnership);
 
   const [manualCollapsed, setManualCollapsed] = useState<Set<string>>(
     new Set(),
@@ -431,9 +465,12 @@ export function Sidebar() {
   const [projectPrError, setProjectPrError] = useState<
     Record<string, string | null>
   >({});
+  const [addProjectDraft, setAddProjectDraft] = useState<AddProjectDraft | null>(null);
   const [pullingPrKey, setPullingPrKey] = useState<string | null>(null);
   const [projectPrSearch, setProjectPrSearch] = useState("");
   const editRef = useRef<string>("");
+  const activeProjectId =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.projectId ?? null;
   const dialogProject = workspaceDialogProjectId
     ? (projects.find((p) => p.id === workspaceDialogProjectId) ?? null)
     : null;
@@ -513,10 +550,66 @@ export function Sidebar() {
     const dirPath = await window.api.app.selectDirectory();
     if (!dirPath) return;
 
+    const existingProject = projects.find((project) => project.repoPath === dirPath);
+    if (existingProject) {
+      addToast({
+        id: crypto.randomUUID(),
+        message: `Project "${existingProject.name}" already exists.`,
+        type: "info",
+      });
+      return;
+    }
+
     const name = basenameSafe(toPosixPath(dirPath)) || dirPath;
-    const id = crypto.randomUUID();
-    addProject({ id, name, repoPath: dirPath });
-  }, [addProject]);
+    setAddProjectDraft({ repoPath: dirPath, name });
+  }, [addToast, projects]);
+
+  const handleOpenProjectThreadDialog = useCallback((projectId: string) => {
+    setNewThreadDialog({ projectId });
+    void openNewThreadDialog();
+  }, [openNewThreadDialog, setNewThreadDialog]);
+
+  const handleOpenPrimaryThreadDialog = useCallback(() => {
+    const targetProject = (activeProjectId && projects.find((project) => project.id === activeProjectId))
+      ?? projects[projects.length - 1]
+      ?? null;
+    if (!targetProject) {
+      addToast({ id: crypto.randomUUID(), message: "Add a project first", type: "info" });
+      return;
+    }
+    setNewThreadDialog({ projectId: targetProject.id });
+    void openNewThreadDialog();
+  }, [activeProjectId, addToast, openNewThreadDialog, projects, setNewThreadDialog]);
+
+  const handleConfirmAddProject = useCallback(
+    (name: string, ownership: ProjectOwnership) => {
+      if (!addProjectDraft) return;
+      addProject({
+        id: crypto.randomUUID(),
+        name,
+        repoPath: addProjectDraft.repoPath,
+        ownership,
+      });
+      setAddProjectDraft(null);
+    },
+    [addProject, addProjectDraft],
+  );
+
+  const createThreadForWorkspace = useCallback(
+    (workspaceId: string) => {
+      const chatTabId = crypto.randomUUID();
+      addTab({
+        id: chatTabId,
+        workspaceId,
+        type: "chat",
+        title: "Thread",
+        threadId: crypto.randomUUID(),
+      });
+      setActiveWorkspace(workspaceId);
+      setActiveTab(chatTabId);
+    },
+    [addTab, setActiveWorkspace, setActiveTab],
+  );
 
   const finishCreateWorkspace = useCallback(
     async (
@@ -525,7 +618,6 @@ export function Sidebar() {
       type: WorkspaceType,
       branch: string,
       worktreePath: string,
-      agentPermissionMode: AgentPermissionMode,
     ) => {
       const wsId = crypto.randomUUID();
       addWorkspace({
@@ -535,51 +627,12 @@ export function Sidebar() {
         branch,
         worktreePath,
         projectId: project.id,
-        agentPermissionMode,
+        agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
       });
 
-      const commands = project.startupCommands ?? [];
-
-      if (commands.some((c) => c.command.trim().startsWith("claude"))) {
-        await window.api.claude.trustPath(worktreePath).catch(() => {});
-      }
-
-      if (commands.length === 0) {
-        const ptyId = await window.api.pty.create(worktreePath, undefined, undefined, {
-          AGENT_ORCH_WS_ID: wsId,
-          AGENT_ORCH_PERMISSION_MODE: agentPermissionMode,
-        });
-        addTab({
-          id: crypto.randomUUID(),
-          workspaceId: wsId,
-          type: "terminal",
-          title: "Terminal",
-          ptyId,
-        });
-      } else {
-        let firstTabId: string | null = null;
-        for (const cmd of commands) {
-          const ptyId = await window.api.pty.create(worktreePath, undefined, undefined, {
-            AGENT_ORCH_WS_ID: wsId,
-            AGENT_ORCH_PERMISSION_MODE: agentPermissionMode,
-          });
-          const tabId = crypto.randomUUID();
-          if (!firstTabId) firstTabId = tabId;
-          addTab({
-            id: tabId,
-            workspaceId: wsId,
-            type: "terminal",
-            title: cmd.name || cmd.command,
-            ptyId,
-          });
-          setTimeout(() => {
-            window.api.pty.write(ptyId, cmd.command + "\n");
-          }, 500);
-        }
-        if (firstTabId) setActiveTab(firstTabId);
-      }
+      createThreadForWorkspace(wsId);
     },
-    [addWorkspace, addTab, setActiveTab],
+    [addWorkspace, createThreadForWorkspace],
   );
 
   const handleCreateWorkspace = useCallback(
@@ -589,11 +642,22 @@ export function Sidebar() {
       type: WorkspaceType,
       branch: string,
       newBranch: boolean,
-      agentPermissionMode: AgentPermissionMode,
       force = false,
       baseBranch?: string,
     ) => {
       if (workspaceCreation) return;
+
+      if (!newBranch) {
+        const existingWorkspace = workspaces.find(
+          (ws) => ws.projectId === project.id && ws.branch === branch,
+        );
+        if (existingWorkspace) {
+          createThreadForWorkspace(existingWorkspace.id);
+          openWorkspaceDialog(null);
+          return;
+        }
+      }
+
       const requestId = crypto.randomUUID();
       setWorkspaceCreation({
         requestId,
@@ -612,18 +676,18 @@ export function Sidebar() {
         );
         setWorkspaceCreation((prev) => {
           if (!prev || prev.requestId !== requestId) return prev;
-          return { ...prev, message: START_TERMINAL_MESSAGE };
+          return { ...prev, message: START_CHAT_MESSAGE };
         });
-        await finishCreateWorkspace(project, name, type, branch, worktreePath, agentPermissionMode);
+        await finishCreateWorkspace(project, name, type, branch, worktreePath);
         openWorkspaceDialog(null);
       } catch (err) {
         const msg =
-          err instanceof Error ? err.message : "Failed to create workspace";
+          err instanceof Error ? err.message : "Failed to create thread";
         const confirmMessages = [
           {
             key: "WORKTREE_PATH_EXISTS",
             title: "Worktree already exists",
-            message: `A leftover directory for workspace "${name}" already exists on disk. Replace it?`,
+            message: `A leftover directory for thread "${name}" already exists on disk. Replace it?`,
           },
           {
             key: "BRANCH_CHECKED_OUT",
@@ -639,7 +703,7 @@ export function Sidebar() {
             destructive: true,
             onConfirm: () => {
               dismissConfirmDialog();
-              handleCreateWorkspace(project, name, type, branch, newBranch, agentPermissionMode, true, baseBranch);
+              handleCreateWorkspace(project, name, type, branch, newBranch, true, baseBranch);
             },
           });
           return;
@@ -654,6 +718,8 @@ export function Sidebar() {
     },
     [
       workspaceCreation,
+      workspaces,
+      createThreadForWorkspace,
       finishCreateWorkspace,
       addToast,
       showConfirmDialog,
@@ -668,7 +734,8 @@ export function Sidebar() {
       setProjectPrError((prev) => ({ ...prev, [project.id]: null }));
 
       try {
-        const result = await window.api.github.listOpenPrs(project.repoPath);
+        const preferredLogin = getPreferredGithubLogin(project, settings);
+        const result = await window.api.github.listOpenPrs(project.repoPath, preferredLogin);
         setGhAvailability(project.id, result.available, result.error);
         if (!result.available) {
           setProjectOpenPrs((prev) => ({ ...prev, [project.id]: [] }));
@@ -697,7 +764,7 @@ export function Sidebar() {
         setProjectPrLoading((prev) => ({ ...prev, [project.id]: false }));
       }
     },
-    [setGhAvailability, setPrStatuses],
+    [setGhAvailability, setPrStatuses, settings],
   );
 
   const handleToggleProjectPrPopover = useCallback(
@@ -754,7 +821,7 @@ export function Sidebar() {
           );
         setWorkspaceCreation((prev) => {
           if (!prev || prev.requestId !== requestId) return prev;
-          return { ...prev, message: START_TERMINAL_MESSAGE };
+          return { ...prev, message: START_CHAT_MESSAGE };
         });
         await finishCreateWorkspace(
           project,
@@ -762,7 +829,6 @@ export function Sidebar() {
           DEFAULT_WORKSPACE_TYPE,
           branch,
           worktreePath,
-          DEFAULT_AGENT_PERMISSION_MODE,
         );
         closeProjectPrModal();
       } catch (err) {
@@ -772,8 +838,8 @@ export function Sidebar() {
             : `Failed to pull PR #${pr.number} locally`;
         if (msg.includes("WORKTREE_PATH_EXISTS") && !force) {
           showConfirmDialog({
-            title: "Workspace path exists",
-            message: `A workspace directory for "${workspaceName}" already exists. Replace it?`,
+            title: "Thread path exists",
+            message: `A thread directory for "${workspaceName}" already exists. Replace it?`,
             confirmLabel: "Replace",
             destructive: true,
             onConfirm: () => {
@@ -819,8 +885,8 @@ export function Sidebar() {
         return;
       }
       showConfirmDialog({
-        title: "Delete Workspace",
-        message: `Delete workspace "${ws.name}"? This will remove the git worktree from disk.`,
+        title: "Delete thread branch",
+        message: `Delete thread branch "${ws.name}"? This will remove the git worktree from disk.`,
         confirmLabel: "Delete",
         destructive: true,
         onConfirm: () => {
@@ -832,6 +898,73 @@ export function Sidebar() {
     [showConfirmDialog, deleteWorkspace, dismissConfirmDialog],
   );
 
+  const handleDeleteThread = useCallback(
+    async (
+      e: React.MouseEvent,
+      thread: { id: string; name: string; workspaceId: string; worktreePath: string },
+    ) => {
+      e.stopPropagation();
+      let statuses: Array<{ path: string; status: string }> = [];
+      try {
+        statuses = await window.api.git.getStatus(thread.worktreePath);
+      } catch {
+        statuses = [];
+      }
+
+      if (statuses.length === 0) {
+        removeTab(thread.id);
+        return;
+      }
+
+      showConfirmDialog({
+        title: "Pending changes in this thread",
+        message: `Thread "${thread.name}" has uncommitted changes. Do you want to commit first, discard changes, or cancel?`,
+        confirmLabel: "Commit first",
+        secondaryLabel: "Discard and close",
+        secondaryDestructive: true,
+        onConfirm: () => {
+          setActiveWorkspace(thread.workspaceId);
+          setActiveTab(thread.id);
+          setRightPanelMode("changes");
+          useAppStore.setState({ rightPanelOpen: true });
+          dismissConfirmDialog();
+        },
+        onSecondary: () => {
+          const tracked = Array.from(
+            new Set(statuses.filter((entry) => entry.status !== "untracked").map((entry) => entry.path)),
+          );
+          const untracked = Array.from(
+            new Set(statuses.filter((entry) => entry.status === "untracked").map((entry) => entry.path)),
+          );
+
+          void (async () => {
+            try {
+              await window.api.git.discard(thread.worktreePath, tracked, untracked);
+              removeTab(thread.id);
+            } catch (err) {
+              const message =
+                err instanceof Error
+                  ? err.message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, "")
+                  : "Failed to discard changes";
+              addToast({ id: crypto.randomUUID(), message, type: "error" });
+            } finally {
+              dismissConfirmDialog();
+            }
+          })();
+        },
+      });
+    },
+    [
+      addToast,
+      dismissConfirmDialog,
+      removeTab,
+      setActiveTab,
+      setActiveWorkspace,
+      setRightPanelMode,
+      showConfirmDialog,
+    ],
+  );
+
   const handleDeleteProject = useCallback(
     (e: React.MouseEvent, project: Project) => {
       e.stopPropagation();
@@ -840,7 +973,7 @@ export function Sidebar() {
       ).length;
       showConfirmDialog({
         title: "Delete Project",
-        message: `Delete project "${project.name}"${wsCount > 0 ? ` and its ${wsCount} workspace${wsCount > 1 ? "s" : ""}` : ""}? This will remove all git worktrees from disk.`,
+        message: `Delete project "${project.name}"${wsCount > 0 ? ` and its ${wsCount} thread branch${wsCount > 1 ? "es" : ""}` : ""}? This will remove all git worktrees from disk.`,
         confirmLabel: "Delete",
         destructive: true,
         onConfirm: () => {
@@ -892,9 +1025,43 @@ export function Sidebar() {
 
   return (
     <div className={styles.sidebar}>
-      <div className={styles.titleArea}>{isWindows && <WindowControls />}</div>
+      <div className={styles.titleArea}>
+        <div className={styles.sidebarToggleSlot}>
+          <Tooltip
+            label="Collapse sidebar"
+            shortcut={formatShortcut(SHORTCUT_MAP.toggleSidebar.mac, SHORTCUT_MAP.toggleSidebar.win)}
+          >
+            <button
+              type="button"
+              className={styles.sidebarToggle}
+              onClick={toggleSidebar}
+              aria-label="Collapse sidebar"
+            >
+              <span className={styles.sidebarToggleGlyph}>&#x2039;</span>
+            </button>
+          </Tooltip>
+        </div>
+      </div>
 
       <div className={styles.projectList}>
+        {projects.length > 0 && (
+          <div className={styles.primaryThreadAction}>
+            <Tooltip
+              label="New thread"
+              shortcut={formatShortcut(SHORTCUT_MAP.newWorkspace.mac, SHORTCUT_MAP.newWorkspace.win)}
+            >
+              <Button
+                appearance="subtle"
+                className={`${styles.actionButton} ${styles.primaryThreadButton}`}
+                onClick={handleOpenPrimaryThreadDialog}
+                icon={<span className={styles.actionIcon}>+</span>}
+              >
+                New thread
+              </Button>
+            </Tooltip>
+          </div>
+        )}
+
         {projects.length === 0 && (
           <div className={styles.emptyState}>
             <span
@@ -915,6 +1082,17 @@ export function Sidebar() {
           const projectWorkspaces = workspaces.filter(
             (w) => w.projectId === project.id,
           );
+          const projectWorkspaceById = new Map(
+            projectWorkspaces.map((workspace) => [workspace.id, workspace]),
+          );
+          const projectThreads = tabs
+            .filter((tab): tab is Extract<Tab, { type: "chat" }> => tab.type === "chat")
+            .map((tab) => {
+              const workspace = projectWorkspaceById.get(tab.workspaceId);
+              if (!workspace) return null;
+              return { tab, workspace };
+            })
+            .filter((entry): entry is { tab: Extract<Tab, { type: "chat" }>; workspace: (typeof projectWorkspaces)[number] } => entry !== null);
 
           return (
             <div key={project.id} className={styles.projectSection}>
@@ -970,98 +1148,79 @@ export function Sidebar() {
 
               {isExpanded && (
                 <div className={styles.workspaceList}>
-                  {projectWorkspaces.map((ws) => {
-                    const isEditing = editingWorkspaceId === ws.id;
-                    const isAutoName = /^ws-[a-z0-9]+$/.test(ws.name);
-                    const metaBranch = ws.branch || basenameSafe(ws.worktreePath);
-                    const displayName = isAutoName ? metaBranch : ws.name;
-                    const showMeta = !!(metaBranch && metaBranch !== displayName);
-                    const isRunning = activeClaudeWorkspaceIds.has(ws.id);
-                    const isWaiting = !isRunning && waitingClaudeWorkspaceIds.has(ws.id);
-                    const isUnread = !isRunning && !isWaiting && unreadWorkspaceIds.has(ws.id);
+                  {projectThreads.length > 0 && (
+                    <div className={styles.threadTree}>
+                      {projectThreads.map(({ tab, workspace }) => {
+                        const displayName = getThreadDisplayName(tab, workspace, chatMessages);
+                        const metaBranch = workspace.branch || basenameSafe(workspace.worktreePath);
+                        const isRunning = activeClaudeWorkspaceIds.has(workspace.id);
+                        const isWaiting = !isRunning && waitingClaudeWorkspaceIds.has(workspace.id);
+                        const isUnread = !isRunning && !isWaiting && unreadWorkspaceIds.has(workspace.id);
 
-                    return (
-                      <div
-                        key={ws.id}
-                        className={`${styles.workspaceItem} ${
-                          ws.id === activeWorkspaceId ? styles.active : ""
-                        } ${isUnread ? styles.unread : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
-                        onClick={() =>
-                          !isEditing && handleSelectWorkspace(ws.id)
-                        }
-                        onDoubleClick={() => {
-                          editRef.current = displayName;
-                          setEditingWorkspaceId(ws.id);
-                        }}
-                      >
-                        <span className={styles.workspaceIcon}>
-                          {ws.automationId ? "\u23F1" : "\u2387"}
-                        </span>
-                        <div className={styles.workspaceNameCol}>
-                          {isEditing ? (
-                            <input
-                              className={styles.workspaceNameInput}
-                              defaultValue={displayName}
-                              autoFocus
-                              ref={(el) => {
-                                if (el) {
-                                  el.select();
-                                }
+                        return (
+                          <div key={tab.id} className={styles.threadTreeRow}>
+                            <div
+                              className={`${styles.workspaceItem} ${
+                                tab.id === activeTabId ? styles.active : ""
+                              } ${isUnread ? styles.unread : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
+                              onClick={() => {
+                                setActiveWorkspace(workspace.id);
+                                setActiveTab(tab.id);
                               }}
-                              onClick={(e) => e.stopPropagation()}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.currentTarget.blur();
-                                } else if (e.key === "Escape") {
-                                  editRef.current = "";
-                                  setEditingWorkspaceId(null);
-                                }
-                              }}
-                              onBlur={(e) => {
-                                const val = e.currentTarget.value.trim();
-                                if (val && val !== ws.name) {
-                                  renameWorkspace(ws.id, val);
-                                }
-                                setEditingWorkspaceId(null);
-                              }}
-                            />
-                          ) : (
-                            <span className={styles.workspaceName}>
-                              {displayName}
-                            </span>
-                          )}
-                          <WorkspaceMeta
-                            projectId={ws.projectId}
-                            branch={metaBranch}
-                            showBranch={!!showMeta}
-                          />
-                        </div>
-                        <Tooltip label="Delete workspace">
-                          <button
-                            aria-label={`Delete workspace ${displayName}`}
-                            className={styles.workspaceDeleteBtn}
-                            onClick={(e) => handleDeleteWorkspace(e, ws)}
-                          >
-                            &#x2715;
-                          </button>
-                        </Tooltip>
-                      </div>
-                    );
-                  })}
+                            >
+                              <span className={styles.workspaceIcon}>
+                                {"\u2387"}
+                              </span>
+                              <div className={styles.workspaceNameCol}>
+                                <span className={styles.workspaceName}>{displayName}</span>
+                                <WorkspaceMeta
+                                  projectId={workspace.projectId}
+                                  branch={metaBranch}
+                                  showBranch={true}
+                                />
+                              </div>
+                              <Tooltip label="Delete thread">
+                                <button
+                                  aria-label={`Delete thread ${displayName}`}
+                                  className={styles.workspaceDeleteBtn}
+                                  onClick={(e) =>
+                                    void handleDeleteThread(e, {
+                                      id: tab.id,
+                                      name: displayName,
+                                      workspaceId: workspace.id,
+                                      worktreePath: workspace.worktreePath,
+                                    })
+                                  }
+                                >
+                                  &#x2715;
+                                </button>
+                              </Tooltip>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {projectThreads.length === 0 && (
+                    <div className={styles.ghStatusHint}>
+                      <span className={styles.ghStatusHintText}>No threads yet.</span>
+                    </div>
+                  )}
 
                   <GhStatusHint projectId={project.id} />
 
                   <Tooltip
-                    label="New workspace"
+                    label="New thread"
                     shortcut={formatShortcut(SHORTCUT_MAP.newWorkspace.mac, SHORTCUT_MAP.newWorkspace.win)}
                   >
                     <Button
                       appearance="subtle"
                       className={styles.actionButton}
-                      onClick={() => openWorkspaceDialog(project.id)}
+                      onClick={() => handleOpenProjectThreadDialog(project.id)}
                       icon={<span className={styles.actionIcon}>+</span>}
                     >
-                      New workspace
+                      New thread
                     </Button>
                   </Tooltip>
                 </div>
@@ -1077,19 +1236,9 @@ export function Sidebar() {
             appearance="subtle"
             className={styles.actionButton}
             onClick={handleAddProject}
-            icon={<span className={styles.actionIcon}>+</span>}
+            icon={<span className={`${styles.actionIcon} ${styles.footerActionIcon}`}>+</span>}
           >
             Add project
-          </Button>
-        </Tooltip>
-        <Tooltip label="Automations">
-          <Button
-            appearance="subtle"
-            className={styles.actionButton}
-            onClick={toggleAutomations}
-            icon={<span className={styles.actionIcon}>{"\u23F1"}</span>}
-          >
-            Automations
           </Button>
         </Tooltip>
         <Tooltip
@@ -1100,7 +1249,7 @@ export function Sidebar() {
             appearance="subtle"
             className={styles.actionButton}
             onClick={toggleSettings}
-            icon={<span className={styles.actionIcon}>{"\u2699"}</span>}
+            icon={<span className={`${styles.actionIcon} ${styles.footerActionIcon}`}>{"\u2699"}</span>}
           >
             Settings
           </Button>
@@ -1290,7 +1439,7 @@ export function Sidebar() {
                           disabled={disablePull}
                         >
                           {existingWorkspace
-                            ? "Focus workspace"
+                            ? "Open thread"
                             : isPulling
                               ? "Pulling..."
                               : "Pull locally"}
@@ -1308,14 +1457,13 @@ export function Sidebar() {
       {dialogProject && (
         <WorkspaceDialog
           project={dialogProject}
-          onConfirm={(name, type, branch, newBranch, baseBranch, agentPermissionMode) => {
+          onConfirm={(name, type, branch, newBranch, baseBranch) => {
             handleCreateWorkspace(
               dialogProject,
               name,
               type,
               branch,
               newBranch,
-              agentPermissionMode,
               false,
               baseBranch,
             );
@@ -1332,10 +1480,11 @@ export function Sidebar() {
       {editingProject && (
         <ProjectSettingsDialog
           project={editingProject}
-          onSave={({ startupCommands, prLinkProvider }) => {
+          onSave={({ startupCommands, prLinkProvider, ownership }) => {
             updateProject(editingProject.id, {
               startupCommands,
               prLinkProvider,
+              ownership,
             });
             setEditingProject(null);
           }}
@@ -1348,9 +1497,23 @@ export function Sidebar() {
           title={confirmDialog.title}
           message={confirmDialog.message}
           confirmLabel={confirmDialog.confirmLabel}
+          secondaryLabel={confirmDialog.secondaryLabel}
           destructive={confirmDialog.destructive}
+          secondaryDestructive={confirmDialog.secondaryDestructive}
           onConfirm={confirmDialog.onConfirm}
+          onSecondary={confirmDialog.onSecondary}
           onCancel={dismissConfirmDialog}
+        />
+      )}
+
+      {addProjectDraft && (
+        <AddProjectDialog
+          open
+          initialName={addProjectDraft.name}
+          repoPath={addProjectDraft.repoPath}
+          initialOwnership={defaultProjectOwnership}
+          onCancel={() => setAddProjectDraft(null)}
+          onConfirm={handleConfirmAddProject}
         />
       )}
     </div>

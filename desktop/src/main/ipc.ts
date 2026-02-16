@@ -4,20 +4,20 @@ import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { watch, type FSWatcher } from 'fs'
+import { pathToFileURL } from 'url'
 import { IPC } from '../shared/ipc-channels'
 import type { ThemePreference } from '../shared/ipc-channels'
 import type { CreateWorktreeProgressEvent } from '../shared/workspace-creation'
 import { debugLog, toPosixPath } from '@shared/platform'
-import { PtyManager } from './pty-manager'
 import { GitService } from './git-service'
 import { GithubService } from './github-service'
 import { FileService } from './file-service'
-import { AutomationScheduler, type AutomationConfig } from './automation-scheduler'
+import { CodexService } from './codex-service'
+import * as openaiAuth from './openai-auth'
 import { trustPathForClaude, loadClaudeSettings, saveClaudeSettings, loadJsonFile, saveJsonFile } from './claude-config'
-import { loadCodexConfigText, saveCodexConfigText } from './codex-config'
+import { loadCodexConfigText, loadCodexModelOptions, saveCodexConfigText } from './codex-config'
 
-const ptyManager = new PtyManager()
-const automationScheduler = new AutomationScheduler(ptyManager)
+const codexService = new CodexService()
 
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
@@ -41,7 +41,7 @@ async function runGitOperation<T>(
   try {
     return await op()
   } catch (error) {
-    console.error('[Terminator] Git operation failed', {
+    console.error('[Terminator Chat] Git operation failed', {
       operation,
       ...context,
       error: serializeError(error),
@@ -332,45 +332,16 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
   })
 
   // ── GitHub handlers ──
-  ipcMain.handle(IPC.GITHUB_GET_PR_STATUSES, async (_e, repoPath: string, branches: string[]) => {
-    return GithubService.getPrStatuses(repoPath, branches)
+  ipcMain.handle(IPC.GITHUB_GET_PR_STATUSES, async (_e, repoPath: string, branches: string[], preferredLogin?: string) => {
+    return GithubService.getPrStatuses(repoPath, branches, preferredLogin)
   })
 
-  ipcMain.handle(IPC.GITHUB_LIST_OPEN_PRS, async (_e, repoPath: string) => {
-    return GithubService.listOpenPrs(repoPath)
+  ipcMain.handle(IPC.GITHUB_LIST_OPEN_PRS, async (_e, repoPath: string, preferredLogin?: string) => {
+    return GithubService.listOpenPrs(repoPath, preferredLogin)
   })
 
-  // ── PTY handlers ──
-  ipcMain.handle(IPC.PTY_CREATE, async (_e, workingDir: string, shell?: string, shellArgs?: string[], extraEnv?: Record<string, string>) => {
-    const win = BrowserWindow.fromWebContents(_e.sender)
-    if (!win) throw new Error('No window found')
-    return ptyManager.create(workingDir, win.webContents, shell, shellArgs, undefined, undefined, extraEnv)
-  })
-
-  ipcMain.on(IPC.PTY_WRITE, async (_e, ptyId: string, data: string) => {
-    try {
-      await ptyManager.write(ptyId, data)
-    } catch (error) {
-      debugLog('PTY write failed', { ptyId, error: serializeError(error) })
-    }
-  })
-
-  ipcMain.on(IPC.PTY_RESIZE, (_e, ptyId: string, cols: number, rows: number) => {
-    ptyManager.resize(ptyId, cols, rows)
-  })
-
-  ipcMain.on(IPC.PTY_DESTROY, (_e, ptyId: string) => {
-    ptyManager.destroy(ptyId)
-  })
-
-  ipcMain.handle(IPC.PTY_LIST, async () => {
-    return ptyManager.list()
-  })
-
-  ipcMain.handle(IPC.PTY_REATTACH, async (_e, ptyId: string) => {
-    const win = BrowserWindow.fromWebContents(_e.sender)
-    if (!win) throw new Error('No window found')
-    return ptyManager.reattach(ptyId, win.webContents)
+  ipcMain.handle(IPC.GITHUB_LIST_AUTH_ACCOUNTS, async (_e, host = 'github.com') => {
+    return GithubService.listAuthAccounts(host)
   })
 
   // ── File handlers ──
@@ -558,6 +529,155 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     const win = BrowserWindow.fromWebContents(_e.sender)
     if (!win) return false
     return win.isMaximized()
+  })
+
+  function quoteCmdArg(value: string): string {
+    return `"${value.replace(/"/g, '\\"')}"`
+  }
+
+  type EditorKind = 'vscode' | 'cursor'
+
+  type LaunchAttempt =
+    | { kind: 'direct'; command: string; args: string[] }
+    | { kind: 'cmd'; commandLine: string }
+
+  function pushIfExists(target: LaunchAttempt[], filePath: string, args: string[]): void {
+    if (existsSync(filePath)) {
+      target.push({ kind: 'direct', command: filePath, args })
+    }
+  }
+
+  function pushCommandVariants(target: LaunchAttempt[], filePath: string, dirPath: string): void {
+    pushIfExists(target, filePath, ['-n', dirPath])
+    pushIfExists(target, filePath, [dirPath])
+  }
+
+  function toFolderUri(dirPath: string): string {
+    return pathToFileURL(dirPath).toString()
+  }
+
+  function pushCliAttempts(target: LaunchAttempt[], commandName: string, dirPath: string): void {
+    const folderUri = toFolderUri(dirPath)
+    target.push({ kind: 'cmd', commandLine: `${commandName} --folder-uri ${quoteCmdArg(folderUri)}` })
+    target.push({ kind: 'cmd', commandLine: `${commandName} -n ${quoteCmdArg(dirPath)}` })
+    target.push({ kind: 'cmd', commandLine: `${commandName} ${quoteCmdArg(dirPath)}` })
+  }
+
+  function pushVSCodeCommandVariants(target: LaunchAttempt[], filePath: string, dirPath: string): void {
+    const folderUri = toFolderUri(dirPath)
+    pushIfExists(target, filePath, ['--new-window', dirPath])
+    pushIfExists(target, filePath, ['--folder-uri', folderUri])
+    pushIfExists(target, filePath, ['-n', dirPath])
+    pushIfExists(target, filePath, [dirPath])
+  }
+
+  function buildEditorLaunchAttempts(editor: EditorKind, dirPath: string): LaunchAttempt[] {
+    const attempts: LaunchAttempt[] = []
+    const localAppData = process.env.LOCALAPPDATA ?? ''
+    const programFiles = process.env.ProgramFiles ?? ''
+    const programFilesX86 = process.env['ProgramFiles(x86)'] ?? ''
+    if (process.platform === 'win32') {
+      if (editor === 'vscode') {
+        // Prefer direct executable paths first to avoid shell parsing quirks.
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd`, dirPath)
+
+        // CLI fallbacks
+        pushCliAttempts(attempts, 'code', dirPath)
+        pushCliAttempts(attempts, 'code-insiders', dirPath)
+        pushCliAttempts(attempts, 'codium', dirPath)
+      } else {
+        pushCommandVariants(attempts, `${localAppData}\\Programs\\Cursor\\Cursor.exe`, dirPath)
+        pushCommandVariants(attempts, `${programFiles}\\Cursor\\Cursor.exe`, dirPath)
+        pushCommandVariants(attempts, `${programFilesX86}\\Cursor\\Cursor.exe`, dirPath)
+        pushCommandVariants(attempts, `${localAppData}\\Programs\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+        pushCommandVariants(attempts, `${programFiles}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+        pushCommandVariants(attempts, `${programFilesX86}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+
+        // CLI fallback
+        pushCliAttempts(attempts, 'cursor', dirPath)
+      }
+
+      return attempts
+    }
+
+    const cmdName = editor === 'vscode' ? 'code' : 'cursor'
+    attempts.push({ kind: 'direct', command: cmdName, args: ['-n', dirPath] })
+    return attempts
+  }
+
+  async function runLaunchAttempt(attempt: LaunchAttempt, cwdPath: string): Promise<boolean> {
+    const { spawn } = await import('child_process')
+    const commonOptions = {
+      detached: true,
+      stdio: 'ignore' as const,
+      windowsHide: true,
+      cwd: cwdPath,
+    }
+
+    if (attempt.kind === 'cmd') {
+      return await new Promise<boolean>((resolve) => {
+        const child = spawn('cmd.exe', ['/d', '/s', '/c', attempt.commandLine], commonOptions)
+        child.once('error', () => resolve(false))
+        child.once('close', (code) => resolve(code === 0))
+        child.once('spawn', () => child.unref())
+      })
+    }
+
+    return await new Promise<boolean>((resolve) => {
+      const child = spawn(attempt.command, attempt.args, commonOptions)
+      child.once('error', () => resolve(false))
+      child.once('spawn', () => {
+        child.unref()
+        resolve(true)
+      })
+      child.once('close', (code) => {
+        if (code !== 0) resolve(false)
+      })
+    })
+  }
+
+  async function openInEditor(editor: EditorKind, dirPath: string): Promise<{ ok: boolean; error?: string }> {
+    if (typeof dirPath !== 'string' || !dirPath.trim()) {
+      return { ok: false, error: 'No folder selected' }
+    }
+    if (!existsSync(dirPath)) {
+      return { ok: false, error: 'Folder does not exist' }
+    }
+
+    const attempts = buildEditorLaunchAttempts(editor, dirPath)
+    for (const attempt of attempts) {
+      if (await runLaunchAttempt(attempt, dirPath)) {
+        return { ok: true }
+      }
+    }
+
+    if (editor === 'vscode') {
+      return {
+        ok: false,
+        error: 'Could not open VS Code. Install the "code" command in PATH or reinstall VS Code with CLI support.',
+      }
+    }
+    return {
+      ok: false,
+      error: 'Could not open Cursor. Install the "cursor" command in PATH from Cursor Command Palette.',
+    }
+  }
+
+  ipcMain.handle(IPC.APP_OPEN_IN_VSCODE, async (_e, dirPath: string) => {
+    return openInEditor('vscode', dirPath)
+  })
+
+  ipcMain.handle(IPC.APP_OPEN_IN_CURSOR, async (_e, dirPath: string) => {
+    return openInEditor('cursor', dirPath)
   })
 
   // ── Claude Code trust ──
@@ -791,40 +911,12 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     return { success: true }
   })
 
-  // ── Automation handlers ──
-  ipcMain.handle(IPC.AUTOMATION_CREATE, async (_e, automation: AutomationConfig) => {
-    automationScheduler.schedule(automation)
-  })
-
-  ipcMain.handle(IPC.AUTOMATION_UPDATE, async (_e, automation: AutomationConfig) => {
-    automationScheduler.schedule(automation) // reschedules
-  })
-
-  ipcMain.handle(IPC.AUTOMATION_DELETE, async (_e, automationId: string) => {
-    automationScheduler.unschedule(automationId)
-  })
-
-  ipcMain.handle(IPC.AUTOMATION_RUN_NOW, async (_e, automation: AutomationConfig) => {
-    automationScheduler.runNow(automation)
-  })
-
-  ipcMain.handle(IPC.AUTOMATION_STOP, async (_e, automationId: string) => {
-    automationScheduler.unschedule(automationId)
-  })
-
-  // Load persisted automations and schedule enabled ones on startup
-  ipcMain.handle(IPC.AUTOMATION_LIST, async () => {
-    // List is just for init — renderer manages the list in store
-    // Main process uses this to bootstrap scheduler from persisted state
-    return null
-  })
-
   // ── Clipboard handlers ──
   ipcMain.handle(IPC.CLIPBOARD_SAVE_IMAGE, async () => {
     const img = clipboard.readImage()
     if (img.isEmpty()) return null
     const buf = img.toPNG()
-    const filePath = join(tmpdir(), `terminator-paste-${Date.now()}.png`)
+    const filePath = join(tmpdir(), `terminator-chat-paste-${Date.now()}.png`)
     await writeFile(filePath, buf)
     return filePath
   })
@@ -839,7 +931,7 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   // ── State persistence handlers ──
   const stateFilePath = () =>
-    join(app.getPath('userData'), 'terminator-state.json')
+    join(app.getPath('userData'), 'terminator-chat-state.json')
 
   ipcMain.handle(IPC.STATE_SAVE, async (_e, data: unknown) => {
     await mkdir(app.getPath('userData'), { recursive: true })
@@ -869,6 +961,78 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     }
     return sanitized.data
   })
+
+  // ── Chat / Codex handlers ──
+  // Initialize from stored token on startup (async, non-blocking)
+  const storedToken = openaiAuth.getStoredToken()
+  if (storedToken) {
+    codexService.setAccessToken(storedToken.accessToken).catch((err) => {
+      console.error('[Terminator Chat] Failed to initialize stored token:', err)
+    })
+  }
+
+  ipcMain.handle(IPC.CHAT_LOGIN, async () => {
+    console.log('[Terminator Chat] Login requested, starting OAuth flow...')
+    try {
+      const result = await openaiAuth.login()
+      await codexService.setAccessToken(result.accessToken)
+      console.log('[Terminator Chat] Login successful')
+      return { success: true }
+    } catch (err) {
+      console.error('[Terminator Chat] Login failed:', err)
+      throw err
+    }
+  })
+
+  ipcMain.handle(IPC.CHAT_LOGOUT, async () => {
+    openaiAuth.logout()
+    codexService.setAccessToken(null)
+  })
+
+  ipcMain.handle(IPC.CHAT_AUTH_STATUS, () => {
+    return { loggedIn: openaiAuth.isLoggedIn() }
+  })
+
+  ipcMain.handle(IPC.CHAT_LIST_MODELS, async () => {
+    return loadCodexModelOptions()
+  })
+
+  ipcMain.handle(
+    IPC.CHAT_CREATE_THREAD,
+    async (
+      _e,
+      workingDir: string,
+      model?: string,
+      effort?: string,
+      options?: {
+        sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+        approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
+      },
+    ) => {
+    // Refresh token if needed before creating thread
+    try {
+      const token = await openaiAuth.refreshIfNeeded()
+      await codexService.setAccessToken(token)
+    } catch {
+      // Token may still be valid, let it try
+    }
+      return codexService.createThread(workingDir, model, effort, options)
+    },
+  )
+
+  ipcMain.handle(IPC.CHAT_SEND, async (e, threadId: string, input: unknown) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return
+    await codexService.sendMessage(threadId, input as any, win)
+  })
+
+  ipcMain.handle(IPC.CHAT_CANCEL, async (_e, threadId: string) => {
+    codexService.cancelTurn(threadId)
+  })
+
+  ipcMain.handle(IPC.CHAT_RESUME, async (_e, threadId: string) => {
+    return codexService.resumeThread(threadId)
+  })
 }
 
 export function sendActivateWorkspace(workspaceId: string): void {
@@ -878,3 +1042,4 @@ export function sendActivateWorkspace(workspaceId: string): void {
     }
   }
 }
+

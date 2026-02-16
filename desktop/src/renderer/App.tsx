@@ -9,12 +9,12 @@ import { useAppStore } from './store/app-store'
 import { Sidebar } from './components/Sidebar/Sidebar'
 import { SidebarRail } from './components/Sidebar/SidebarRail'
 import { TabBar } from './components/TabBar/TabBar'
-import { TerminalPanel } from './components/Terminal/TerminalPanel'
 import { FileEditor } from './components/Editor/FileEditor'
 import { DiffViewer } from './components/Editor/DiffEditor'
+import { ChatPanel } from './components/Chat/ChatPanel'
+import { NewThreadDialog } from './components/Chat/NewThreadDialog'
 import { RightPanel } from './components/RightPanel/RightPanel'
 import { SettingsPanel } from './components/Settings/SettingsPanel'
-import { AutomationsPanel } from './components/Automations/AutomationsPanel'
 import { QuickOpen } from './components/QuickOpen/QuickOpen'
 import { CommandPalette } from './components/CommandPalette/CommandPalette'
 import { ToastContainer } from './components/Toast/Toast'
@@ -137,10 +137,64 @@ function applyThemeToDocument(theme: ThemeChangedPayload, preference: ThemePrefe
   if (accentGlow) root.style.setProperty('--accent-blue-glow', accentGlow)
 }
 
+function WindowControls() {
+  const [maximized, setMaximized] = useState(false)
+
+  useEffect(() => {
+    let mounted = true
+    window.api.app
+      .isWindowMaximized()
+      .then((value) => {
+        if (mounted) setMaximized(value)
+      })
+      .catch(() => {})
+
+    const unsub = window.api.app.onWindowMaximizedChange((value) => setMaximized(value))
+    return () => {
+      mounted = false
+      unsub()
+    }
+  }, [])
+
+  return (
+    <div className={styles.windowControls}>
+      <button
+        type="button"
+        className={styles.windowControlButton}
+        onClick={() => window.api.app.minimizeWindow()}
+        aria-label="Minimize window"
+      >
+        <span className={`${styles.windowControlGlyph} ${styles.windowControlGlyphMinimize}`} />
+      </button>
+      <button
+        type="button"
+        className={styles.windowControlButton}
+        onClick={() => window.api.app.toggleMaximizeWindow()}
+        aria-label={maximized ? 'Restore window' : 'Maximize window'}
+      >
+        <span
+          className={`${styles.windowControlGlyph} ${
+            maximized ? styles.windowControlGlyphRestore : styles.windowControlGlyphMaximize
+          }`}
+        />
+      </button>
+      <button
+        type="button"
+        className={`${styles.windowControlButton} ${styles.windowControlButtonClose}`}
+        onClick={() => window.api.app.closeWindow()}
+        aria-label="Close window"
+      >
+        <span className={`${styles.windowControlGlyph} ${styles.windowControlGlyphClose}`} />
+      </button>
+    </div>
+  )
+}
+
 export function App() {
   useShortcuts()
   usePrStatusPoller()
   const [osTheme, setOsTheme] = useState<ThemeChangedPayload>(DEFAULT_THEME)
+  const isWindows = navigator.userAgent.toLowerCase().includes('windows')
 
   // Listen for workspace notification signals from Claude Code hooks
   useEffect(() => {
@@ -148,7 +202,6 @@ export function App() {
       const state = useAppStore.getState()
       if (workspaceId !== state.activeWorkspaceId) {
         state.markWorkspaceUnread(workspaceId)
-        return
       }
 
       const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
@@ -186,7 +239,7 @@ export function App() {
   }, [])
 
   const {
-    tabs: allTabs,
+    tabs,
     activeTabId,
     rightPanelOpen,
     sidebarCollapsed,
@@ -195,7 +248,6 @@ export function App() {
     activeWorkspaceId,
     settings,
     settingsOpen,
-    automationsOpen,
     quickOpenVisible,
     commandPaletteVisible,
     runningAgentCount,
@@ -204,18 +256,15 @@ export function App() {
   const unreadWorkspaceCount = useAppStore((s) => s.unreadWorkspaceIds.size)
 
   const wsTabs = activeWorkspaceTabs()
-  const activeTab = wsTabs.find((t) => t.id === activeTabId)
+  const activeTab = tabs.find((t) => t.id === activeTabId)
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
   const activeAgents = runningAgentCount
   const waitingAgents = waitingAgentCount
   const appStyle = {
-    '--window-controls-width': '0px',
-    '--window-controls-width-tabbar': '0px',
-    '--window-controls-width-right-panel': '0px',
+    '--window-controls-width': isWindows ? '132px' : '0px',
+    '--window-controls-width-tabbar': isWindows && !rightPanelOpen ? '132px' : '0px',
+    '--window-controls-width-right-panel': isWindows && rightPanelOpen ? '132px' : '0px',
   } as CSSProperties
-
-  // All terminal tabs across every workspace — kept alive to preserve PTY state
-  const allTerminals = allTabs.filter((t): t is Extract<typeof t, { type: 'terminal' }> => t.type === 'terminal')
 
   useEffect(() => {
     window.api.app.setUnreadCount(unreadWorkspaceCount)
@@ -233,7 +282,15 @@ export function App() {
   }, [settings.themePreference])
 
   const isDark = settings.themePreference === 'system' ? osTheme.dark : settings.themePreference === 'dark'
-  const fluentTheme = useMemo(() => isDark ? customDarkTheme : webLightTheme, [isDark])
+  const fluentTheme = useMemo<Theme>(() => {
+    const baseTheme = isDark ? customDarkTheme : webLightTheme
+    return {
+      ...baseTheme,
+      fontFamilyBase: 'var(--font-sans)',
+      fontFamilyMonospace: 'var(--font-mono)',
+      fontFamilyNumeric: 'var(--font-sans)',
+    }
+  }, [isDark])
 
   useEffect(() => {
     applyThemeToDocument(osTheme, settings.themePreference)
@@ -242,16 +299,19 @@ export function App() {
   return (
     <FluentProvider theme={fluentTheme} style={{ background: 'transparent' }}>
       <div className={styles.app} style={appStyle}>
+        {isWindows && (
+          <div className={styles.windowControlsOverlay}>
+            <WindowControls />
+          </div>
+        )}
         <div className={styles.layout}>
           {settingsOpen ? (
             <SettingsPanel />
-          ) : automationsOpen ? (
-            <AutomationsPanel />
           ) : (
             <Allotment>
               {/* Sidebar */}
               {sidebarCollapsed ? (
-                <Allotment.Pane minSize={44} maxSize={62} preferredSize={48}>
+                <Allotment.Pane minSize={26} maxSize={40} preferredSize={30}>
                   <SidebarRail />
                 </Allotment.Pane>
               ) : (
@@ -265,29 +325,39 @@ export function App() {
                 <div className={styles.centerPanel}>
                   <TabBar />
                   <div className={styles.contentArea}>
-                    {/* Keep ALL terminal panels alive across workspaces so PTY
-                        state (scrollback, TUI layout) is never lost */}
-                    {allTerminals.map((t) => (
-                      <TerminalPanel
-                        key={t.id}
-                        ptyId={t.ptyId}
-                        active={t.id === activeTabId}
-                      />
-                    ))}
-
                     {!activeTab ? (
                       <div className={styles.welcome}>
-                        <div className={styles.welcomeLogo}>terminator</div>
+                        <div className={styles.welcomeLogo}>terminator chat</div>
                         <div className={styles.welcomeHint}>
                           Add a project to get started, or press
                           <span className={styles.welcomeShortcut}>
-                            <kbd>{formatShortcut(SHORTCUT_MAP.newTerminal.mac, SHORTCUT_MAP.newTerminal.win)}</kbd>
+                            <kbd>{formatShortcut(SHORTCUT_MAP.newChat.mac, SHORTCUT_MAP.newChat.win)}</kbd>
                           </span>
-                          for a new terminal
+                          for a new thread
                         </div>
                       </div>
                     ) : (
                       <>
+                        {/* Keep all chat panels mounted so streaming responses continue across tab switches */}
+                        {tabs
+                          .filter((tab) => tab.type === 'chat')
+                          .map((tab) => {
+                            const chatWorkspace = workspaces.find((w) => w.id === tab.workspaceId)
+                            const isActiveChat = activeTab?.type === 'chat' && activeTab.id === tab.id
+                            return (
+                              <div
+                                key={tab.id}
+                                style={{ display: isActiveChat ? 'block' : 'none', height: '100%' }}
+                              >
+                                <ChatPanel
+                                  threadId={tab.threadId}
+                                  workspaceId={tab.workspaceId}
+                                  worktreePath={chatWorkspace?.worktreePath}
+                                />
+                              </div>
+                            )
+                          })}
+
                         {/* Render active file editor */}
                         {activeTab?.type === 'file' && (
                           <FileEditor
@@ -325,16 +395,11 @@ export function App() {
           <div className={styles.statusGroup}>
             <div className={styles.statusItem}>
               <span className={`${styles.dot} ${workspace ? styles.dotConnected : styles.dotNeutral}`} />
-              <span>Workspace</span>
+              <span>Thread</span>
             </div>
             <div className={styles.statusItem}>
-              <span>{workspace ? workspace.name : 'No workspace selected'}</span>
+              <span>{workspace ? workspace.name : 'No thread selected'}</span>
             </div>
-            {workspace?.branch && (
-              <div className={styles.statusItem}>
-                <span>{workspace.branch}</span>
-              </div>
-            )}
           </div>
           <div className={styles.statusGroup}>
             <div className={styles.statusItem}>
@@ -356,6 +421,7 @@ export function App() {
           <QuickOpen worktreePath={workspace.worktreePath} />
         )}
         {commandPaletteVisible && <CommandPalette />}
+        <NewThreadDialog />
         <ToastContainer />
       </div>
     </FluentProvider>

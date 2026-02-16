@@ -1,0 +1,32 @@
+.surface {
+  max-width: 520px;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.label {
+  font-size: 11px;
+  color: var(--colorNeutralForeground3);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--colorNeutralBackground1);
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: var(--borderRadiusMedium);
+  color: var(--colorNeutralForeground1);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--durationFaster) var(--curveEasyEase);
+}
+
+.input:focus {
+  border-color: var(--colorBrandForeground1);
+}

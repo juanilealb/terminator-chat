@@ -7,44 +7,52 @@
 }
 
 .railHeader {
-  height: var(--titlebar-height);
+  height: 40px;
   border-bottom: 1px solid var(--colorNeutralStroke2);
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  padding: 0;
   -webkit-app-region: drag;
 }
 
-.expandButton {
-  width: 24px;
-  height: 24px;
+.sidebarToggleSlot {
+  width: 30px;
+  flex: 0 0 30px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebarToggle {
+  width: 18px;
+  height: 18px;
   border: 1px solid var(--colorNeutralStroke2);
-  border-radius: var(--borderRadiusCircular);
-  background: transparent;
+  border-radius: 5px;
+  background: linear-gradient(180deg, var(--colorNeutralBackground3) 0%, var(--colorNeutralBackground2) 100%);
   color: var(--colorNeutralForeground2);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   cursor: pointer;
+  -webkit-app-region: no-drag;
   transition: background var(--durationFaster) var(--curveEasyEase),
     border-color var(--durationFaster) var(--curveEasyEase),
     color var(--durationFaster) var(--curveEasyEase);
-  -webkit-app-region: no-drag;
 }
 
-.expandButton:hover {
+.sidebarToggle:hover {
   background: var(--colorSubtleBackgroundHover);
   border-color: var(--colorNeutralStroke1);
   color: var(--colorNeutralForeground1);
 }
 
-.expandGlyph {
-  width: 6px;
-  height: 6px;
-  border-top: 1.5px solid currentColor;
-  border-right: 1.5px solid currentColor;
-  transform: rotate(45deg);
-  margin-right: 1px;
+.sidebarToggleGlyph {
+  font-size: 12px;
+  line-height: 1;
+  margin-top: -1px;
 }
 
 .workspaceList {
@@ -54,13 +62,23 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 7px;
-  padding: 10px 0;
+  gap: 5px;
+  padding: 8px 0;
+}
+
+.primaryActionSlot {
+  width: 100%;
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--colorNeutralStroke2);
 }
 
 .workspaceButton {
-  width: 10px;
-  height: 10px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   border: 1px solid var(--colorNeutralStroke1);
   background: var(--colorNeutralBackground3);
@@ -82,8 +100,8 @@
   border-color: var(--colorBrandBackground);
   background: var(--colorBrandBackground);
   box-shadow:
-    0 0 0 3px var(--colorBrandBackgroundInvertedSelected),
-    0 0 10px var(--colorBrandBackgroundInvertedSelected);
+    0 0 0 2px var(--colorBrandBackgroundInvertedSelected),
+    0 0 6px var(--colorBrandBackgroundInvertedSelected);
 }
 
 .workspaceButton.unread {
@@ -106,16 +124,16 @@
 .workspaceButton.running::after {
   content: '';
   position: absolute;
-  inset: -2px;
+  inset: -1px;
   border-radius: 50%;
-  border: 1.5px solid transparent;
+  border: 1px solid transparent;
   border-top-color: var(--colorPaletteTealForeground2);
   border-right-color: var(--colorPaletteTealForeground2);
   animation: railSpin 0.9s linear infinite;
 }
 
 .projectDivider {
-  width: 14px;
+  width: 9px;
   height: 1px;
   margin: 2px 0;
   border-radius: var(--borderRadiusCircular);
@@ -123,12 +141,41 @@
 }
 
 .emptyMarker {
-  width: 10px;
-  height: 10px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   border: 1px dashed var(--colorNeutralStroke2);
   opacity: 0.65;
   margin-top: 2px;
+}
+
+.actions {
+  border-top: 1px solid var(--colorNeutralStroke2);
+  background: var(--colorNeutralBackground2);
+  min-height: 78px;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.actionSlot {
+  width: 30px;
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.actionButton {
+  flex-shrink: 0;
+}
+
+.actionGlyph {
+  font-size: 12px;
+  line-height: 1;
 }
 
 @keyframes railSpin {

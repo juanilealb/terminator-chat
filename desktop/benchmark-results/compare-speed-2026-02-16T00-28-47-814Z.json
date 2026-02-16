@@ -1,0 +1,141 @@
+{
+  "generatedAt": "2026-02-16T00:28:47.813Z",
+  "iterations": 1,
+  "timeoutMs": 20000,
+  "runsByApp": {
+    "terminator-fluent": [
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 1,
+        "metrics": {
+          "launchMs": 1727.5883,
+          "projectAddUiMs": 82.3214,
+          "workspaceCreateMs": 861.3785,
+          "terminalOpenUiMs": 867.7532,
+          "terminalEchoRttMs": 2426.4065,
+          "gitStatusMs": 54.395,
+          "fileTreeMs": 56.4269
+        },
+        "notes": [],
+        "success": true
+      }
+    ],
+    "terminator": [
+      {
+        "appId": "terminator",
+        "runIndex": 1,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      }
+    ]
+  },
+  "summary": {
+    "terminator-fluent": {
+      "launchMs": {
+        "count": 1,
+        "mean": 1727.5883,
+        "median": 1727.5883,
+        "min": 1727.5883,
+        "max": 1727.5883
+      },
+      "projectAddUiMs": {
+        "count": 1,
+        "mean": 82.3214,
+        "median": 82.3214,
+        "min": 82.3214,
+        "max": 82.3214
+      },
+      "workspaceCreateMs": {
+        "count": 1,
+        "mean": 861.3785,
+        "median": 861.3785,
+        "min": 861.3785,
+        "max": 861.3785
+      },
+      "terminalOpenUiMs": {
+        "count": 1,
+        "mean": 867.7532,
+        "median": 867.7532,
+        "min": 867.7532,
+        "max": 867.7532
+      },
+      "terminalEchoRttMs": {
+        "count": 1,
+        "mean": 2426.4065,
+        "median": 2426.4065,
+        "min": 2426.4065,
+        "max": 2426.4065
+      },
+      "gitStatusMs": {
+        "count": 1,
+        "mean": 54.395,
+        "median": 54.395,
+        "min": 54.395,
+        "max": 54.395
+      },
+      "fileTreeMs": {
+        "count": 1,
+        "mean": 56.4269,
+        "median": 56.4269,
+        "min": 56.4269,
+        "max": 56.4269
+      },
+      "failures": 0
+    },
+    "terminator": {
+      "launchMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "projectAddUiMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "workspaceCreateMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalOpenUiMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalEchoRttMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "gitStatusMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "fileTreeMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "failures": 1
+    }
+  }
+}

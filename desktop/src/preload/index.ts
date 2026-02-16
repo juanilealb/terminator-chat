@@ -99,29 +99,6 @@ const api = {
       ipcRenderer.invoke(IPC.GIT_DROP_SNAPSHOT, worktreePath, ref),
   },
 
-  pty: {
-    create: (workingDir: string, shell?: string, shellArgs?: string[], extraEnv?: Record<string, string>) =>
-      ipcRenderer.invoke(IPC.PTY_CREATE, workingDir, shell, shellArgs, extraEnv),
-    write: (ptyId: string, data: string) =>
-      ipcRenderer.send(IPC.PTY_WRITE, ptyId, data),
-    resize: (ptyId: string, cols: number, rows: number) =>
-      ipcRenderer.send(IPC.PTY_RESIZE, ptyId, cols, rows),
-    destroy: (ptyId: string) =>
-      ipcRenderer.send(IPC.PTY_DESTROY, ptyId),
-    list: () =>
-      ipcRenderer.invoke(IPC.PTY_LIST) as Promise<string[]>,
-    reattach: (ptyId: string) =>
-      ipcRenderer.invoke(IPC.PTY_REATTACH, ptyId) as Promise<boolean>,
-    onData: (ptyId: string, callback: (data: string) => void) => {
-      const channel = `${IPC.PTY_DATA}:${ptyId}`
-      const listener = (_event: Electron.IpcRendererEvent, data: string) => callback(data)
-      ipcRenderer.on(channel, listener)
-      return () => {
-        ipcRenderer.removeListener(channel, listener)
-      }
-    },
-  },
-
   fs: {
     getTree: (dirPath: string) =>
       ipcRenderer.invoke(IPC.FS_GET_TREE, dirPath),
@@ -163,6 +140,16 @@ const api = {
       ipcRenderer.send(IPC.APP_WINDOW_CLOSE),
     isWindowMaximized: () =>
       ipcRenderer.invoke(IPC.APP_WINDOW_IS_MAXIMIZED) as Promise<boolean>,
+    openInVSCode: (dirPath: string) =>
+      ipcRenderer.invoke(IPC.APP_OPEN_IN_VSCODE, dirPath) as Promise<{
+        ok: boolean
+        error?: string
+      }>,
+    openInCursor: (dirPath: string) =>
+      ipcRenderer.invoke(IPC.APP_OPEN_IN_CURSOR, dirPath) as Promise<{
+        ok: boolean
+        error?: string
+      }>,
     onOpenDirectory: (callback: (dirPath: string) => void) => {
       openDirectoryListeners.add(callback)
       while (pendingDirectoryPaths.length > 0) {
@@ -248,31 +235,17 @@ const api = {
       ipcRenderer.invoke(IPC.CODEX_CHECK_NOTIFY),
   },
 
-  automations: {
-    create: (automation: unknown) =>
-      ipcRenderer.invoke(IPC.AUTOMATION_CREATE, automation),
-    update: (automation: unknown) =>
-      ipcRenderer.invoke(IPC.AUTOMATION_UPDATE, automation),
-    delete: (automationId: string) =>
-      ipcRenderer.invoke(IPC.AUTOMATION_DELETE, automationId),
-    runNow: (automation: unknown) =>
-      ipcRenderer.invoke(IPC.AUTOMATION_RUN_NOW, automation),
-    stop: (automationId: string) =>
-      ipcRenderer.invoke(IPC.AUTOMATION_STOP, automationId),
-    onRunStarted: (callback: (data: { automationId: string; automationName: string; projectId: string; ptyId: string; worktreePath: string; branch: string }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, data: { automationId: string; automationName: string; projectId: string; ptyId: string; worktreePath: string; branch: string }) => callback(data)
-      ipcRenderer.on(IPC.AUTOMATION_RUN_STARTED, listener)
-      return () => {
-        ipcRenderer.removeListener(IPC.AUTOMATION_RUN_STARTED, listener)
-      }
-    },
-  },
-
   github: {
-    getPrStatuses: (repoPath: string, branches: string[]) =>
-      ipcRenderer.invoke(IPC.GITHUB_GET_PR_STATUSES, repoPath, branches),
-    listOpenPrs: (repoPath: string) =>
-      ipcRenderer.invoke(IPC.GITHUB_LIST_OPEN_PRS, repoPath),
+    getPrStatuses: (repoPath: string, branches: string[], preferredLogin?: string) =>
+      ipcRenderer.invoke(IPC.GITHUB_GET_PR_STATUSES, repoPath, branches, preferredLogin),
+    listOpenPrs: (repoPath: string, preferredLogin?: string) =>
+      ipcRenderer.invoke(IPC.GITHUB_LIST_OPEN_PRS, repoPath, preferredLogin),
+    listAuthAccounts: (host = 'github.com') =>
+      ipcRenderer.invoke(IPC.GITHUB_LIST_AUTH_ACCOUNTS, host) as Promise<{
+        available: boolean
+        error?: 'gh_not_installed' | 'not_authenticated' | 'not_github_repo'
+        data: string[]
+      }>,
   },
 
   clipboard: {
@@ -282,6 +255,40 @@ const api = {
       ipcRenderer.invoke(IPC.CLIPBOARD_READ_TEXT) as Promise<string>,
     writeText: (text: string) =>
       ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, text),
+  },
+
+  chat: {
+    login: () =>
+      ipcRenderer.invoke(IPC.CHAT_LOGIN) as Promise<{ success: boolean }>,
+    logout: () =>
+      ipcRenderer.invoke(IPC.CHAT_LOGOUT),
+    getAuthStatus: () =>
+      ipcRenderer.invoke(IPC.CHAT_AUTH_STATUS) as Promise<{ loggedIn: boolean }>,
+    listModels: () =>
+      ipcRenderer.invoke(IPC.CHAT_LIST_MODELS) as Promise<Array<{ value: string; label: string }>>,
+    createThread: (
+      workingDir: string,
+      model?: string,
+      effort?: string,
+      options?: {
+        sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+        approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
+      },
+    ) =>
+      ipcRenderer.invoke(IPC.CHAT_CREATE_THREAD, workingDir, model, effort, options) as Promise<string>,
+    send: (threadId: string, input: string | Array<{ type: string; text?: string; path?: string }>) =>
+      ipcRenderer.invoke(IPC.CHAT_SEND, threadId, input),
+    cancel: (threadId: string) =>
+      ipcRenderer.invoke(IPC.CHAT_CANCEL, threadId),
+    resume: (threadId: string) =>
+      ipcRenderer.invoke(IPC.CHAT_RESUME, threadId) as Promise<boolean>,
+    onEvent: (callback: (event: { threadId: string; type: string; data: unknown }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: { threadId: string; type: string; data: unknown }) => callback(data)
+      ipcRenderer.on(IPC.CHAT_EVENT, listener)
+      return () => {
+        ipcRenderer.removeListener(IPC.CHAT_EVENT, listener)
+      }
+    },
   },
 
   state: {

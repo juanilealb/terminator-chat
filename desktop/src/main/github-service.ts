@@ -7,6 +7,7 @@ import type {
   PrState,
   OpenPrInfo,
   ListOpenPrsResult,
+  GithubAuthAccountsResult,
 } from '../shared/github-types'
 
 const execFileAsync = promisify(execFile)
@@ -98,6 +99,12 @@ interface UnresolvedThreadCacheEntry {
   fetchedAt: number
 }
 
+interface GhAuthHostEntry {
+  state?: string
+  login?: string
+  active?: boolean
+}
+
 class GithubAuthError extends Error {}
 
 export class GithubService {
@@ -151,7 +158,11 @@ export class GithubService {
     }
   }
 
-  static async getPrStatuses(repoPath: string, branches: string[]): Promise<PrLookupResult> {
+  static async getPrStatuses(
+    repoPath: string,
+    branches: string[],
+    preferredLogin?: string,
+  ): Promise<PrLookupResult> {
     if (!(await this.isGhAvailable())) {
       return { available: false, error: 'gh_not_installed', data: {} }
     }
@@ -159,8 +170,8 @@ export class GithubService {
     if (!repoInfo) {
       return { available: false, error: 'not_github_repo', data: {} }
     }
-    const token = await this.getAuthToken()
-    if (!token) {
+    const tokens = await this.getAuthTokenCandidates(preferredLogin)
+    if (tokens.length === 0) {
       return { available: false, error: 'not_authenticated', data: {} }
     }
 
@@ -179,23 +190,31 @@ export class GithubService {
     const cacheKey = this.cacheKey(repoPath, normalizedBranches)
     const cached = this.responseCache.get(cacheKey)
 
-    try {
-      const result = await this.fetchRepoPrStatuses(repoInfo, normalizedBranches, token)
-      this.setCachedResponse(cacheKey, result.data)
-      return { available: true, data: this.cloneData(result.data) }
-    } catch (err) {
-      if (err instanceof GithubAuthError) {
-        this.clearAuthTokenCache()
-        return { available: false, error: 'not_authenticated', data: {} }
+    let authFailed = false
+    for (const token of tokens) {
+      try {
+        const result = await this.fetchRepoPrStatuses(repoInfo, normalizedBranches, token)
+        this.setCachedResponse(cacheKey, result.data)
+        return { available: true, data: this.cloneData(result.data) }
+      } catch (err) {
+        if (err instanceof GithubAuthError) {
+          authFailed = true
+          continue
+        }
+        if (cached) {
+          return { available: true, data: this.cloneData(cached.data) }
+        }
+        return { available: true, data: this.emptyResult(normalizedBranches) }
       }
-      if (cached) {
-        return { available: true, data: this.cloneData(cached.data) }
-      }
-      return { available: true, data: this.emptyResult(normalizedBranches) }
     }
+    if (authFailed) {
+      this.clearAuthTokenCache()
+      return { available: false, error: 'not_authenticated', data: {} }
+    }
+    return { available: true, data: this.emptyResult(normalizedBranches) }
   }
 
-  static async listOpenPrs(repoPath: string): Promise<ListOpenPrsResult> {
+  static async listOpenPrs(repoPath: string, preferredLogin?: string): Promise<ListOpenPrsResult> {
     if (!(await this.isGhAvailable())) {
       return { available: false, error: 'gh_not_installed', data: [] }
     }
@@ -203,8 +222,8 @@ export class GithubService {
     if (!repoInfo) {
       return { available: false, error: 'not_github_repo', data: [] }
     }
-    const token = await this.getAuthToken()
-    if (!token) {
+    const tokens = await this.getAuthTokenCandidates(preferredLogin)
+    if (tokens.length === 0) {
       return { available: false, error: 'not_authenticated', data: [] }
     }
 
@@ -213,22 +232,46 @@ export class GithubService {
       return { available: true, data: this.cloneOpenPrs(cached.data) }
     }
 
+    let authFailed = false
+    for (const token of tokens) {
+      try {
+        const data = await this.fetchOpenPrList(repoInfo, token)
+        this.openPrListCache.set(repoPath, {
+          fetchedAt: Date.now(),
+          data: this.cloneOpenPrs(data),
+        })
+        return { available: true, data: this.cloneOpenPrs(data) }
+      } catch (err) {
+        if (err instanceof GithubAuthError) {
+          authFailed = true
+          continue
+        }
+        if (cached) {
+          return { available: true, data: this.cloneOpenPrs(cached.data) }
+        }
+        return { available: true, data: [] }
+      }
+    }
+    if (authFailed) {
+      this.clearAuthTokenCache()
+      return { available: false, error: 'not_authenticated', data: [] }
+    }
+    return { available: true, data: [] }
+  }
+
+  static async listAuthAccounts(host = 'github.com'): Promise<GithubAuthAccountsResult> {
+    if (!(await this.isGhAvailable())) {
+      return { available: false, error: 'gh_not_installed', data: [] }
+    }
     try {
-      const data = await this.fetchOpenPrList(repoInfo, token)
-      this.openPrListCache.set(repoPath, {
-        fetchedAt: Date.now(),
-        data: this.cloneOpenPrs(data),
-      })
-      return { available: true, data: this.cloneOpenPrs(data) }
-    } catch (err) {
-      if (err instanceof GithubAuthError) {
-        this.clearAuthTokenCache()
+      const users = await this.loadAuthUsers(host)
+      const accounts = users.map((user) => user.login)
+      if (accounts.length === 0) {
         return { available: false, error: 'not_authenticated', data: [] }
       }
-      if (cached) {
-        return { available: true, data: this.cloneOpenPrs(cached.data) }
-      }
-      return { available: true, data: [] }
+      return { available: true, data: accounts }
+    } catch {
+      return { available: false, error: 'not_authenticated', data: [] }
     }
   }
 
@@ -257,14 +300,78 @@ export class GithubService {
     return this.authToken
   }
 
+  private static async getAuthTokenCandidates(preferredLogin?: string): Promise<string[]> {
+    const tokens: string[] = []
+    const activeToken = await this.getAuthToken()
+
+    try {
+      const users = await this.loadAuthUsers('github.com')
+
+      const preferred = preferredLogin?.trim()
+      if (preferred) {
+        users.sort((a, b) => {
+          if (a.login === preferred && b.login !== preferred) return -1
+          if (b.login === preferred && a.login !== preferred) return 1
+          return Number(b.active) - Number(a.active)
+        })
+      }
+
+      for (const user of users) {
+        try {
+          const { stdout: tokenOut } = await execFileAsync(
+            'gh',
+            ['auth', 'token', '--hostname', 'github.com', '--user', user.login],
+            { timeout: 5000 }
+          )
+          const token = tokenOut.trim()
+          if (token && !tokens.includes(token)) {
+            tokens.push(token)
+          }
+        } catch {
+          // Ignore users that cannot provide a token.
+        }
+      }
+    } catch {
+      // Fall back to active token only.
+    }
+
+    if (tokens.length === 0 && activeToken) {
+      tokens.push(activeToken)
+    }
+
+    return tokens
+  }
+
+  private static async loadAuthUsers(host: string): Promise<Array<{ login: string; active: boolean }>> {
+    const { stdout } = await execFileAsync('gh', ['auth', 'status', '--json', 'hosts'], { timeout: 5000 })
+    const parsed = JSON.parse(stdout) as { hosts?: Record<string, GhAuthHostEntry[]> }
+    const users = (parsed.hosts?.[host] ?? [])
+      .filter((entry) => entry.state === 'success' && typeof entry.login === 'string' && entry.login.trim().length > 0)
+      .map((entry) => ({ login: (entry.login as string).trim(), active: Boolean(entry.active) }))
+    const deduped = Array.from(
+      new Map(users.map((user) => [user.login, user])).values()
+    )
+    deduped.sort((a, b) => Number(b.active) - Number(a.active) || a.login.localeCompare(b.login))
+    return deduped
+  }
+
   private static parseGithubRemote(remote: string): GithubRepoInfo | null {
     const trimmed = remote.trim()
     if (!trimmed) return null
 
+    const isSupportedGithubHost = (host: string): boolean => {
+      const normalizedHost = host.toLowerCase()
+      return (
+        normalizedHost === 'github.com' ||
+        normalizedHost === 'ssh.github.com' ||
+        normalizedHost.startsWith('github-')
+      )
+    }
+
     if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('ssh://')) {
       try {
         const parsed = new URL(trimmed)
-        if (parsed.hostname.toLowerCase() !== 'github.com') return null
+        if (!isSupportedGithubHost(parsed.hostname)) return null
         const parts = parsed.pathname.replace(/^\/+/, '').replace(/\/+$/, '').split('/')
         if (parts.length < 2) return null
         const owner = parts[0]
@@ -276,12 +383,18 @@ export class GithubService {
       }
     }
 
-    const sshMatch = trimmed.match(/^[^@]+@github\.com:([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i)
-    if (sshMatch?.[1] && sshMatch?.[2]) {
-      return { owner: sshMatch[1], name: sshMatch[2] }
+    const sshMatch = trimmed.match(/^[^@]+@(github(?:-[^:]+)?|ssh\.github\.com):([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i)
+    if (sshMatch?.[2] && sshMatch?.[3]) {
+      return { owner: sshMatch[2], name: sshMatch[3] }
     }
 
-    const plainMatch = trimmed.match(/^github\.com[:/]([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i)
+    const genericSshMatch = trimmed.match(/^[^@]+@([^:\s]+):([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i)
+    if (genericSshMatch?.[1] && genericSshMatch?.[2] && genericSshMatch?.[3]) {
+      if (!isSupportedGithubHost(genericSshMatch[1])) return null
+      return { owner: genericSshMatch[2], name: genericSshMatch[3] }
+    }
+
+    const plainMatch = trimmed.match(/^github(?:-[^:]+)?[:/]([^/\s:]+)\/([^/\s]+?)(?:\.git)?$/i)
     if (plainMatch?.[1] && plainMatch?.[2]) {
       return { owner: plainMatch[1], name: plainMatch[2] }
     }
@@ -655,7 +768,7 @@ export class GithubService {
           Authorization: `Bearer ${token}`,
           Accept: 'application/vnd.github+json',
           'Content-Type': 'application/json',
-          'User-Agent': 'terminator-desktop',
+          'User-Agent': 'terminator-chat-desktop',
         },
         body: JSON.stringify({ query, variables }),
         signal: controller.signal,

@@ -1,8 +1,8 @@
 {
-    "name": "terminator",
-    "productName": "Terminator",
-    "version": "1.0.1",
-    "description": "Windows app for running multiple AI terminals in parallel",
+    "name": "terminator-chat",
+    "productName": "Terminator Chat",
+    "version": "1.0.0",
+    "description": "Windows app for conversational AI coding agents",
     "main": "./out/main/index.js",
     "scripts": {
         "dev": "electron-vite dev",
@@ -20,28 +20,19 @@
     "dependencies": {
         "@fluentui/react-components": "^9.56.0",
         "@fluentui/react-icons": "^2.0.258",
+        "@fontsource-variable/manrope": "^5.2.8",
         "@monaco-editor/react": "^4.7.0",
+        "@openai/codex-sdk": "^0.101.0",
         "@pierre/diffs": "^1.0.10",
-        "@xterm/addon-fit": "^0.11.0",
-        "@xterm/addon-search": "^0.15.0",
-        "@xterm/addon-serialize": "^0.14.0",
-        "@xterm/addon-unicode11": "^0.9.0",
-        "@xterm/addon-web-links": "^0.12.0",
-        "@xterm/addon-webgl": "^0.19.0",
-        "@xterm/xterm": "^6.0.0",
         "allotment": "^1.20.5",
         "electron-vite": "^5.0.0",
         "geist": "^1.7.0",
         "monaco-editor": "^0.55.1",
         "node-cron": "^4.2.1",
-        "node-pty": "^1.1.0",
         "react": "^19.2.4",
         "react-dom": "^19.2.4",
         "v8-compile-cache": "^2.4.0",
         "zustand": "^5.0.11"
-    },
-    "patchedDependencies": {
-        "node-pty@1.1.0": "patches/node-pty@1.1.0.patch"
     },
     "devDependencies": {
         "@playwright/test": "^1.58.2",

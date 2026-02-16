@@ -7,8 +7,8 @@ const { tmpdir } = require('node:os')
 const workspaceId = process.env.AGENT_ORCH_WS_ID || ''
 if (!workspaceId) process.exit(0)
 
-const notifyDir = join(tmpdir(), 'terminator-notify')
-const activityDir = join(tmpdir(), 'terminator-activity')
+const notifyDir = join(tmpdir(), 'terminator-chat-notify')
+const activityDir = join(tmpdir(), 'terminator-chat-activity')
 const codexMarkerPrefix = `${workspaceId}.codex.`
 const codexWaitingMarkerPrefix = `${workspaceId}.codex-wait.`
 

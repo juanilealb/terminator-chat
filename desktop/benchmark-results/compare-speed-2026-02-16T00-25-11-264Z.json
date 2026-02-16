@@ -1,0 +1,222 @@
+{
+  "generatedAt": "2026-02-16T00:25:11.262Z",
+  "iterations": 5,
+  "timeoutMs": 20000,
+  "runsByApp": {
+    "terminator-fluent": [
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 1,
+        "metrics": {
+          "launchMs": 7923.6632,
+          "projectAddUiMs": 119.1275
+        },
+        "notes": [
+          "Error: page.evaluate: Error: Error invoking remote method 'git:create-worktree': Error: Command failed: git fetch --prune origin\nfatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 2,
+        "metrics": {
+          "launchMs": 1716.9045,
+          "projectAddUiMs": 89.6736
+        },
+        "notes": [
+          "Error: page.evaluate: Error: Error invoking remote method 'git:create-worktree': Error: Command failed: git fetch --prune origin\nfatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 3,
+        "metrics": {
+          "launchMs": 1555.9149,
+          "projectAddUiMs": 69.1688
+        },
+        "notes": [
+          "Error: page.evaluate: Error: Error invoking remote method 'git:create-worktree': Error: Command failed: git fetch --prune origin\nfatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 4,
+        "metrics": {
+          "launchMs": 886.1366,
+          "projectAddUiMs": 48.0425
+        },
+        "notes": [
+          "Error: page.evaluate: Error: Error invoking remote method 'git:create-worktree': Error: Command failed: git fetch --prune origin\nfatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 5,
+        "metrics": {
+          "launchMs": 1129.2957,
+          "projectAddUiMs": 57.1258
+        },
+        "notes": [
+          "Error: page.evaluate: Error: Error invoking remote method 'git:create-worktree': Error: Command failed: git fetch --prune origin\nfatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        ],
+        "success": false
+      }
+    ],
+    "terminator": [
+      {
+        "appId": "terminator",
+        "runIndex": 1,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator",
+        "runIndex": 2,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator",
+        "runIndex": 3,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator",
+        "runIndex": 4,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      },
+      {
+        "appId": "terminator",
+        "runIndex": 5,
+        "metrics": {},
+        "notes": [
+          "TimeoutError: electronApplication.firstWindow: Timeout 30000ms exceeded while waiting for event \"window\""
+        ],
+        "success": false
+      }
+    ]
+  },
+  "summary": {
+    "terminator-fluent": {
+      "launchMs": {
+        "count": 5,
+        "mean": 2642.38298,
+        "median": 1555.9149,
+        "min": 886.1366,
+        "max": 7923.6632
+      },
+      "projectAddUiMs": {
+        "count": 5,
+        "mean": 76.62764,
+        "median": 69.1688,
+        "min": 48.0425,
+        "max": 119.1275
+      },
+      "workspaceCreateMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalOpenUiMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalEchoRttMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "gitStatusMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "fileTreeMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "failures": 5
+    },
+    "terminator": {
+      "launchMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "projectAddUiMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "workspaceCreateMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalOpenUiMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "terminalEchoRttMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "gitStatusMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "fileTreeMs": {
+        "count": 0,
+        "mean": 0,
+        "median": 0,
+        "min": 0,
+        "max": 0
+      },
+      "failures": 5
+    }
+  }
+}

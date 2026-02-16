@@ -1,13 +1,119 @@
 .app {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background:
-    radial-gradient(120% 120% at 10% -10%, rgba(72, 209, 138, 0.08) 0%, rgba(21, 18, 24, 0) 42%),
-    radial-gradient(90% 100% at 100% 100%, rgba(99, 212, 217, 0.08) 0%, rgba(21, 18, 24, 0) 34%),
-    var(--bg-app);
+  background: #14111b;
+}
+
+.windowControlsOverlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 20;
+  height: var(--titlebar-height);
+  -webkit-app-region: drag;
+}
+
+.windowControls {
+  display: inline-flex;
+  align-items: stretch;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.windowControlButton {
+  width: 44px;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.windowControlButton:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.windowControlButton:active {
+  background: var(--bg-surface-active);
+}
+
+.windowControlButtonClose:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.windowControlGlyph {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+}
+
+.windowControlGlyphMinimize::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 6px;
+  height: 1px;
+  background: currentColor;
+}
+
+.windowControlGlyphMaximize::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border: 1px solid currentColor;
+}
+
+.windowControlGlyphRestore::before,
+.windowControlGlyphRestore::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 6px;
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
+.windowControlGlyphRestore::before {
+  top: 1px;
+  right: 1px;
+}
+
+.windowControlGlyphRestore::after {
+  top: 4px;
+  left: 1px;
+}
+
+.windowControlGlyphClose::before,
+.windowControlGlyphClose::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 1px;
+  height: 10px;
+  background: currentColor;
+}
+
+.windowControlGlyphClose::before {
+  transform: rotate(45deg);
+}
+
+.windowControlGlyphClose::after {
+  transform: rotate(-45deg);
 }
 
 .layout {
@@ -32,9 +138,7 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(46, 38, 48, 0.08) 0%, transparent 28%),
-    linear-gradient(270deg, rgba(46, 38, 48, 0.06) 0%, transparent 24%);
+  background: none;
 }
 
 .contentArea {
@@ -108,6 +212,23 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.statusBranchSelect {
+  height: 20px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  padding: 0 6px;
+  max-width: 180px;
+}
+
+.statusBranchSelect:focus {
+  outline: none;
+  border-color: var(--accent-blue);
 }
 
 .dot {

@@ -3,9 +3,7 @@ import { Input, Badge, Caption1 } from '@fluentui/react-components'
 import { SearchRegular } from '@fluentui/react-icons'
 import { useFocusTrap } from '../../hooks/useFocusTrap'
 import { useAppStore } from '../../store/app-store'
-import type { Tab } from '../../store/types'
-import { dispatchTerminalUiAction, type TerminalUiAction } from '../../utils/terminal-actions'
-import { expandPromptTemplate, normalizePreviewUrl } from '../../utils/prompt-template'
+import { expandPromptTemplate } from '../../utils/prompt-template'
 import styles from './CommandPalette.module.css'
 
 interface CommandAction {
@@ -17,8 +15,6 @@ interface CommandAction {
   shortcut?: string
   run: () => Promise<void> | void
 }
-
-type TerminalTab = Extract<Tab, { type: 'terminal' }>
 
 function scoreCommand(query: string, action: CommandAction): number {
   if (!query) return 0
@@ -38,120 +34,42 @@ export function CommandPalette() {
     activeWorkspaceId,
     rightPanelOpen,
     settings,
-    tabs,
-    activeTabId,
-    setActiveWorkspace,
-    setActiveTab,
     setRightPanelMode,
     toggleRightPanel,
     toggleSidebar,
-    createTerminalForActiveWorkspace,
-    focusOrCreateTerminal,
-    openWorkspaceDialog,
-    activeProject,
+    openNewThreadDialog,
+    focusOrCreateChat,
     toggleSettings,
     toggleQuickOpen,
     addToast,
     closeCommandPalette,
-    setPreviewUrl,
   } = useAppStore()
 
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
 
-  const ensureRightPanelMode = (mode: 'files' | 'changes' | 'memory' | 'preview') => {
+  const ensureRightPanelMode = (mode: 'files' | 'changes' | 'memory') => {
     setRightPanelMode(mode)
     if (!rightPanelOpen) toggleRightPanel()
-  }
-
-  const triggerTerminalAction = (action: TerminalUiAction): boolean => {
-    let terminalTab = tabs.find((t): t is TerminalTab => t.id === activeTabId && t.type === 'terminal')
-
-    if (!terminalTab && workspace) {
-      terminalTab = tabs.find((t): t is TerminalTab => t.type === 'terminal' && t.workspaceId === workspace.id)
-      if (terminalTab) setActiveTab(terminalTab.id)
-    }
-
-    if (!terminalTab) {
-      addToast({ id: crypto.randomUUID(), message: 'No terminal available', type: 'info' })
-      return false
-    }
-
-    dispatchTerminalUiAction(terminalTab.ptyId, action)
-    return true
-  }
-
-  const insertTemplateIntoTerminal = async (templateContent: string, templateName: string) => {
-    const expanded = await expandPromptTemplate(templateContent, workspace)
-    let terminalTab = tabs.find((t): t is TerminalTab => t.id === activeTabId && t.type === 'terminal')
-
-    if (!terminalTab || (workspace && terminalTab.workspaceId !== workspace.id)) {
-      const workspaceTerminal = workspace
-        ? tabs.find((t): t is TerminalTab => t.type === 'terminal' && t.workspaceId === workspace.id)
-        : undefined
-      if (workspaceTerminal) {
-        terminalTab = workspaceTerminal
-      } else {
-        if (workspace) setActiveWorkspace(workspace.id)
-        await createTerminalForActiveWorkspace()
-        const latest = useAppStore.getState()
-        const created = latest.tabs.find((t) => t.id === latest.activeTabId)
-        terminalTab = created?.type === 'terminal' ? created : undefined
-      }
-    }
-
-    if (!terminalTab) {
-      addToast({ id: crypto.randomUUID(), message: 'No terminal available for template insertion', type: 'error' })
-      return
-    }
-
-    window.api.pty.write(terminalTab.ptyId, expanded)
-    addToast({
-      id: crypto.randomUUID(),
-      message: `Template "${templateName}" inserted into terminal`,
-      type: 'info',
-    })
   }
 
   const actionList = useMemo<CommandAction[]>(() => {
     const actions: CommandAction[] = [
       {
-        id: 'new-terminal',
-        title: 'New terminal',
-        description: 'Open a terminal in the active workspace or quick-start from a folder',
-        keywords: ['terminal', '/terminal', '/t', 'quick'],
-        category: 'Terminal',
-        shortcut: '/t',
-        run: async () => createTerminalForActiveWorkspace(),
+        id: 'new-chat',
+        title: 'New thread',
+        description: 'Choose branch/context and start a new thread',
+        keywords: ['thread', '/thread', '/chat', '/c'],
+        category: 'Chat',
+        shortcut: '/c',
+        run: async () => openNewThreadDialog(),
       },
       {
-        id: 'focus-terminal',
-        title: 'Focus terminal',
-        description: 'Focus first terminal tab or create one',
-        keywords: ['terminal', 'focus', '/focus'],
-        category: 'Terminal',
-        run: async () => focusOrCreateTerminal(),
-      },
-      {
-        id: 'find-terminal',
-        title: 'Find in terminal',
-        description: 'Search text in the active terminal scrollback',
-        keywords: ['terminal', 'find', '/terminal-find'],
-        category: 'Terminal',
-        shortcut: '/find',
-        run: () => {
-          triggerTerminalAction('find')
-        },
-      },
-      {
-        id: 'clear-terminal',
-        title: 'Clear terminal',
-        description: 'Clear active terminal viewport and scrollback',
-        keywords: ['terminal', 'clear', '/terminal-clear'],
-        category: 'Terminal',
-        shortcut: '/clear',
-        run: () => {
-          triggerTerminalAction('clear')
-        },
+        id: 'focus-chat',
+        title: 'Focus chat',
+        description: 'Focus first chat tab or create one',
+        keywords: ['chat', 'focus', '/focus'],
+        category: 'Chat',
+        run: async () => focusOrCreateChat(),
       },
       {
         id: 'quick-open',
@@ -171,22 +89,11 @@ export function CommandPalette() {
       },
       {
         id: 'new-workspace',
-        title: 'New workspace',
-        description: 'Open create workspace dialog',
-        keywords: ['workspace', '/workspace'],
+        title: 'New thread',
+        description: 'Choose branch/context and start a new thread',
+        keywords: ['thread', 'workspace', '/thread', '/workspace'],
         category: 'Navigation',
-        run: () => {
-          const project = activeProject()
-          if (project) {
-            openWorkspaceDialog(project.id)
-            return
-          }
-          if (useAppStore.getState().projects.length === 1) {
-            openWorkspaceDialog(useAppStore.getState().projects[0].id)
-            return
-          }
-          addToast({ id: crypto.randomUUID(), message: 'Select a project first', type: 'info' })
-        },
+        run: () => openNewThreadDialog(),
       },
       {
         id: 'toggle-sidebar',
@@ -222,15 +129,6 @@ export function CommandPalette() {
         category: 'Panels',
         shortcut: '/memory',
         run: () => ensureRightPanelMode('memory'),
-      },
-      {
-        id: 'panel-preview',
-        title: 'Show preview panel',
-        description: 'Open local preview panel',
-        keywords: ['preview', '/preview'],
-        category: 'Panels',
-        shortcut: '/preview',
-        run: () => ensureRightPanelMode('preview'),
       },
     ]
 
@@ -275,12 +173,13 @@ export function CommandPalette() {
       actions.push({
         id: `template-${template.id}`,
         title: `Run template: ${template.name}`,
-        description: 'Expand mentions and insert into terminal',
+        description: 'Expand mentions and insert into chat',
         keywords: ['template', '/template', template.name.toLowerCase()],
         category: 'Templates',
         shortcut: '/template',
         run: async () => {
-          await insertTemplateIntoTerminal(template.content, template.name)
+          const expanded = await expandPromptTemplate(template.content, workspace)
+          addToast({ id: crypto.randomUUID(), message: `Template "${template.name}" expanded (${expanded.length} chars)`, type: 'info' })
         },
       })
     }
@@ -289,17 +188,12 @@ export function CommandPalette() {
   }, [
     workspace,
     settings.promptTemplates,
-    activeProject,
-    createTerminalForActiveWorkspace,
-    focusOrCreateTerminal,
+    openNewThreadDialog,
+    focusOrCreateChat,
     toggleQuickOpen,
     toggleSettings,
     toggleSidebar,
-    openWorkspaceDialog,
     addToast,
-    setActiveWorkspace,
-    tabs,
-    activeTabId,
     rightPanelOpen,
   ])
 
@@ -326,20 +220,12 @@ export function CommandPalette() {
     const command = commandRaw.toLowerCase()
     const arg = rest.join(' ').trim()
 
-    if (command === 'terminal' || command === 't') {
-      await createTerminalForActiveWorkspace()
+    if (command === 'chat' || command === 'c') {
+      await openNewThreadDialog()
       return true
     }
     if (command === 'files') {
       ensureRightPanelMode('files')
-      return true
-    }
-    if (command === 'terminal-find' || command === 'find') {
-      triggerTerminalAction('find')
-      return true
-    }
-    if (command === 'terminal-clear' || command === 'clear') {
-      triggerTerminalAction('clear')
       return true
     }
     if (command === 'changes') {
@@ -348,24 +234,6 @@ export function CommandPalette() {
     }
     if (command === 'memory') {
       ensureRightPanelMode('memory')
-      return true
-    }
-    if (command === 'preview') {
-      ensureRightPanelMode('preview')
-      return true
-    }
-    if (command === 'preview-url') {
-      if (!workspace) {
-        addToast({ id: crypto.randomUUID(), message: 'Select a workspace first', type: 'info' })
-        return true
-      }
-      const normalized = normalizePreviewUrl(arg)
-      if (!normalized) {
-        addToast({ id: crypto.randomUUID(), message: 'Usage: /preview-url 3000', type: 'info' })
-        return true
-      }
-      setPreviewUrl(workspace.id, normalized)
-      ensureRightPanelMode('preview')
       return true
     }
     if (command === 'snapshot') {
@@ -406,13 +274,14 @@ export function CommandPalette() {
         addToast({ id: crypto.randomUUID(), message: `Template "${arg}" not found`, type: 'error' })
         return true
       }
-      await insertTemplateIntoTerminal(template.content, template.name)
+      const expanded = await expandPromptTemplate(template.content, workspace)
+      addToast({ id: crypto.randomUUID(), message: `Template "${template.name}" expanded (${expanded.length} chars)`, type: 'info' })
       return true
     }
     if (command === 'help') {
       addToast({
         id: crypto.randomUUID(),
-        message: 'Slash commands: /terminal /terminal-find /terminal-clear /files /changes /memory /preview /preview-url /snapshot /restore-latest /template',
+        message: 'Slash commands: /chat /files /changes /memory /snapshot /restore-latest /template',
         type: 'info',
       })
       return true

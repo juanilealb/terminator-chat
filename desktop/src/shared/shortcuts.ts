@@ -6,7 +6,7 @@ export interface ShortcutBinding {
 export const SHORTCUT_MAP: Record<string, ShortcutBinding> = {
   quickOpenFile: { mac: 'Ctrl+P', win: 'Ctrl+P' },
   commandPalette: { mac: 'Ctrl+Shift+P', win: 'Ctrl+Shift+P' },
-  newTerminal: { mac: 'Ctrl+T', win: 'Ctrl+T' },
+  newChat: { mac: 'Ctrl+T', win: 'Ctrl+T' },
   closeTab: { mac: 'Ctrl+W', win: 'Ctrl+W' },
   closeAllTabs: { mac: 'Ctrl+Shift+W', win: 'Ctrl+Shift+W' },
   nextTab: { mac: 'Ctrl+Shift+]', win: 'Ctrl+Shift+]' },
@@ -20,8 +20,7 @@ export const SHORTCUT_MAP: Record<string, ShortcutBinding> = {
   filesPanel: { mac: 'Ctrl+Shift+E', win: 'Ctrl+Shift+E' },
   changesPanel: { mac: 'Ctrl+Shift+G', win: 'Ctrl+Shift+G' },
   memoryPanel: { mac: 'Ctrl+Shift+M', win: 'Ctrl+Shift+M' },
-  previewPanel: { mac: 'Ctrl+Shift+V', win: 'Ctrl+Shift+V' },
-  focusTerminal: { mac: 'Ctrl+J', win: 'Ctrl+J' },
+  focusChat: { mac: 'Ctrl+J', win: 'Ctrl+J' },
   increaseFontSize: { mac: 'Ctrl++', win: 'Ctrl++' },
   decreaseFontSize: { mac: 'Ctrl+-', win: 'Ctrl+-' },
   resetFontSize: { mac: 'Ctrl+0', win: 'Ctrl+0' },

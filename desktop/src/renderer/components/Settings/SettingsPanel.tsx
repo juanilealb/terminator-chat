@@ -21,15 +21,16 @@ import {
 import { formatShortcut } from '@shared/platform'
 import { SHORTCUT_MAP, type ShortcutBinding } from '@shared/shortcuts'
 import { useAppStore } from '../../store/app-store'
-import type { PromptTemplate, Settings } from '../../store/types'
+import { PROJECT_OWNERSHIPS, type ProjectOwnership, type PromptTemplate, type Settings } from '../../store/types'
 import type { ThemePreference } from '@shared/ipc-channels'
+import type { GithubAuthAccountsResult } from '@shared/github-types'
 import { Tooltip } from '../Tooltip/Tooltip'
 import styles from './SettingsPanel.module.css'
 
 const SHORTCUTS: Array<{ action: string; binding: ShortcutBinding }> = [
   { action: 'Quick open file', binding: SHORTCUT_MAP.quickOpenFile },
   { action: 'Command palette', binding: SHORTCUT_MAP.commandPalette },
-  { action: 'New terminal', binding: SHORTCUT_MAP.newTerminal },
+  { action: 'New thread', binding: SHORTCUT_MAP.newChat },
   { action: 'Close tab', binding: SHORTCUT_MAP.closeTab },
   { action: 'Close all tabs', binding: SHORTCUT_MAP.closeAllTabs },
   { action: 'Next tab', binding: SHORTCUT_MAP.nextTab },
@@ -37,14 +38,13 @@ const SHORTCUTS: Array<{ action: string; binding: ShortcutBinding }> = [
   { action: 'Tab 1–9', binding: SHORTCUT_MAP.tabOneToNine },
   { action: 'Next workspace', binding: SHORTCUT_MAP.nextWorkspace },
   { action: 'Previous workspace', binding: SHORTCUT_MAP.previousWorkspace },
-  { action: 'New workspace', binding: SHORTCUT_MAP.newWorkspace },
+  { action: 'New thread context', binding: SHORTCUT_MAP.newWorkspace },
   { action: 'Toggle sidebar', binding: SHORTCUT_MAP.toggleSidebar },
   { action: 'Toggle right panel', binding: SHORTCUT_MAP.toggleRightPanel },
   { action: 'Files panel', binding: SHORTCUT_MAP.filesPanel },
   { action: 'Changes panel', binding: SHORTCUT_MAP.changesPanel },
   { action: 'Memory panel', binding: SHORTCUT_MAP.memoryPanel },
-  { action: 'Preview panel', binding: SHORTCUT_MAP.previewPanel },
-  { action: 'Focus terminal', binding: SHORTCUT_MAP.focusTerminal },
+  { action: 'Focus chat', binding: SHORTCUT_MAP.focusChat },
   { action: 'Increase font size', binding: SHORTCUT_MAP.increaseFontSize },
   { action: 'Decrease font size', binding: SHORTCUT_MAP.decreaseFontSize },
   { action: 'Reset font size', binding: SHORTCUT_MAP.resetFontSize },
@@ -55,6 +55,11 @@ const THEME_OPTIONS: Array<{ value: ThemePreference; label: string }> = [
   { value: 'system', label: 'Follow system' },
   { value: 'dark', label: 'Dark' },
   { value: 'light', label: 'Light' },
+]
+
+const PROJECT_OWNERSHIP_OPTIONS: Array<{ value: ProjectOwnership; label: string }> = [
+  { value: 'personal', label: 'Personal' },
+  { value: 'work', label: 'Laburo' },
 ]
 
 function SettingRow({ label, description, children }: {
@@ -105,6 +110,69 @@ function TemplateEditorRow({
         size="small"
       />
     </Card>
+  )
+}
+
+function OpenAIAccountSection() {
+  const codexLoggedIn = useAppStore((s) => s.codexLoggedIn)
+  const setCodexLoggedIn = useAppStore((s) => s.setCodexLoggedIn)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleLogin = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      await window.api.chat.login()
+      setCodexLoggedIn(true)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Login failed'
+      setError(msg)
+      console.error('[Settings] Login error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLogout = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      await window.api.chat.logout()
+      setCodexLoggedIn(false)
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <SettingRow
+      label="OpenAI account"
+      description={error ?? 'Sign in with your ChatGPT account to use the Codex agent'}
+    >
+      {codexLoggedIn ? (
+        <Button
+          appearance="subtle"
+          size="small"
+          className={styles.dangerBtn}
+          onClick={handleLogout}
+          disabled={loading}
+        >
+          {loading ? 'Signing out...' : 'Sign out'}
+        </Button>
+      ) : (
+        <Button
+          appearance="primary"
+          size="small"
+          onClick={handleLogin}
+          disabled={loading}
+        >
+          {loading ? 'Signing in...' : 'Sign in with ChatGPT'}
+        </Button>
+      )}
+    </SettingRow>
   )
 }
 
@@ -241,10 +309,46 @@ const shortcutColumns = [
 
 export function SettingsPanel() {
   const { settings, updateSettings, toggleSettings } = useAppStore()
+  const [githubAccounts, setGithubAccounts] = useState<string[]>([])
+  const [githubAccountsLoading, setGithubAccountsLoading] = useState(false)
+  const [githubAccountsError, setGithubAccountsError] = useState<string | null>(null)
 
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     updateSettings({ [key]: value })
   }
+
+  const loadGithubAccounts = async () => {
+    setGithubAccountsLoading(true)
+    setGithubAccountsError(null)
+    try {
+      const result = await window.api.github.listAuthAccounts('github.com') as GithubAuthAccountsResult
+      if (!result.available) {
+        setGithubAccounts([])
+        setGithubAccountsError(
+          result.error === 'gh_not_installed'
+            ? 'GitHub CLI no está instalado.'
+            : 'No hay cuentas autenticadas en gh.',
+        )
+        return
+      }
+      setGithubAccounts(result.data)
+    } catch {
+      setGithubAccounts([])
+      setGithubAccountsError('No se pudieron cargar las cuentas de gh.')
+    } finally {
+      setGithubAccountsLoading(false)
+    }
+  }
+
+  const githubAccountOptions = Array.from(
+    new Set(
+      [
+        ...githubAccounts,
+        settings.githubPersonalLogin.trim(),
+        settings.githubWorkLogin.trim(),
+      ].filter(Boolean),
+    ),
+  )
 
   const updateTemplate = (id: string, partial: Partial<PromptTemplate>) => {
     update('promptTemplates', settings.promptTemplates.map((template) =>
@@ -274,6 +378,10 @@ export function SettingsPanel() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [toggleSettings])
+
+  useEffect(() => {
+    void loadGithubAccounts()
+  }, [])
 
   return (
     <div className={styles.panel}>
@@ -314,34 +422,6 @@ export function SettingsPanel() {
                     </Option>
                   ))}
                 </Dropdown>
-              </SettingRow>
-
-              <SettingRow
-                label="Terminal font size"
-                description="Font size in pixels for terminal tabs"
-              >
-                <SpinButton
-                  className={styles.spinButton}
-                  value={settings.terminalFontSize}
-                  min={8}
-                  max={32}
-                  onChange={(_, data) => {
-                    if (data.value !== undefined && data.value !== null) {
-                      update('terminalFontSize', data.value)
-                    }
-                  }}
-                  size="small"
-                />
-              </SettingRow>
-
-              <SettingRow
-                label="Terminal copy on select"
-                description="Automatically copy selected terminal text to clipboard"
-              >
-                <Switch
-                  checked={settings.terminalCopyOnSelect}
-                  onChange={(_, data) => update('terminalCopyOnSelect', data.checked)}
-                />
               </SettingRow>
 
               <SettingRow
@@ -409,32 +489,6 @@ export function SettingsPanel() {
               </SettingRow>
 
               <SettingRow
-                label="Default shell"
-                description="Path to shell executable (leave empty for system default)"
-              >
-                <Input
-                  className={styles.textInput}
-                  value={settings.defaultShell}
-                  onChange={(_, data) => update('defaultShell', data.value)}
-                  placeholder="e.g., pwsh.exe, powershell.exe, cmd.exe"
-                  size="small"
-                />
-              </SettingRow>
-
-              <SettingRow
-                label="Default shell args"
-                description="Optional startup arguments for the default shell"
-              >
-                <Input
-                  className={styles.textInput}
-                  value={settings.defaultShellArgs}
-                  onChange={(_, data) => update('defaultShellArgs', data.value)}
-                  placeholder='e.g., -NoLogo or /K "chcp 65001>nul"'
-                  size="small"
-                />
-              </SettingRow>
-
-              <SettingRow
                 label="PR link provider"
                 description="Set per project in Project Settings (gear icon in the sidebar)."
               >
@@ -443,10 +497,105 @@ export function SettingsPanel() {
             </Card>
           </div>
 
+          {/* GitHub */}
+          <div className={styles.section}>
+            <Caption1 className={styles.sectionLabel}>GitHub</Caption1>
+            <Card className={styles.card}>
+              <SettingRow
+                label="Default project ownership"
+                description="Used as the default value when creating a new project."
+              >
+                <Dropdown
+                  className={styles.dropdown}
+                  value={PROJECT_OWNERSHIP_OPTIONS.find((o) => o.value === settings.defaultProjectOwnership)?.label ?? 'Personal'}
+                  selectedOptions={[settings.defaultProjectOwnership]}
+                  onOptionSelect={(_, data) => {
+                    if (!data.optionValue) return
+                    update('defaultProjectOwnership', data.optionValue as ProjectOwnership)
+                  }}
+                  size="small"
+                >
+                  {PROJECT_OWNERSHIPS.map((option) => (
+                    <Option key={option} value={option}>
+                      {PROJECT_OWNERSHIP_OPTIONS.find((o) => o.value === option)?.label ?? option}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </SettingRow>
+
+              <SettingRow
+                label="Personal account login"
+                description="Cuenta usada para proyectos Personal."
+              >
+                <Dropdown
+                  className={styles.dropdown}
+                  value={settings.githubPersonalLogin || 'No definida'}
+                  selectedOptions={[settings.githubPersonalLogin || '__none__']}
+                  onOptionSelect={(_, data) =>
+                    update(
+                      'githubPersonalLogin',
+                      data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
+                    )
+                  }
+                  size="small"
+                >
+                  <Option value="__none__">No definida</Option>
+                  {githubAccountOptions.map((account) => (
+                    <Option key={`personal-${account}`} value={account}>
+                      {account}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </SettingRow>
+
+              <SettingRow
+                label="Work account login"
+                description="Cuenta usada para proyectos Laburo."
+              >
+                <Dropdown
+                  className={styles.dropdown}
+                  value={settings.githubWorkLogin || 'No definida'}
+                  selectedOptions={[settings.githubWorkLogin || '__none__']}
+                  onOptionSelect={(_, data) =>
+                    update(
+                      'githubWorkLogin',
+                      data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
+                    )
+                  }
+                  size="small"
+                >
+                  <Option value="__none__">No definida</Option>
+                  {githubAccountOptions.map((account) => (
+                    <Option key={`work-${account}`} value={account}>
+                      {account}
+                    </Option>
+                  ))}
+                </Dropdown>
+              </SettingRow>
+
+              <SettingRow
+                label="Detected gh accounts"
+                description={githubAccountsError ?? `${githubAccounts.length} account(s) detected.`}
+              >
+                <Button
+                  appearance="secondary"
+                  size="small"
+                  onClick={() => {
+                    void loadGithubAccounts()
+                  }}
+                  disabled={githubAccountsLoading}
+                >
+                  {githubAccountsLoading ? 'Refreshing...' : 'Refresh'}
+                </Button>
+              </SettingRow>
+            </Card>
+          </div>
+
           {/* Agent Integrations */}
           <div className={styles.section}>
             <Caption1 className={styles.sectionLabel}>Agent Integrations</Caption1>
             <Card className={styles.card}>
+              <OpenAIAccountSection />
               <ClaudeHooksSection />
               <CodexNotifySection />
             </Card>

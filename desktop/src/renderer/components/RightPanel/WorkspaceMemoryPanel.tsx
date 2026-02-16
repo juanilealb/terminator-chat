@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button, Input, Textarea } from '@fluentui/react-components'
 import {
   SaveRegular,
@@ -28,12 +28,7 @@ function formatSnapshotDate(unixSeconds: number): string {
 export function WorkspaceMemoryPanel({ workspace }: Props) {
   const {
     settings,
-    tabs,
-    activeTabId,
     updateWorkspaceMemory,
-    setActiveWorkspace,
-    setActiveTab,
-    createTerminalForActiveWorkspace,
     addToast,
     showConfirmDialog,
     dismissConfirmDialog,
@@ -42,11 +37,6 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
   const [snapshotLabel, setSnapshotLabel] = useState('')
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loadingSnapshots, setLoadingSnapshots] = useState(false)
-
-  const workspaceTabs = useMemo(
-    () => tabs.filter((tab) => tab.workspaceId === workspace.id),
-    [tabs, workspace.id]
-  )
 
   const refreshSnapshots = useCallback(async () => {
     setLoadingSnapshots(true)
@@ -65,63 +55,16 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
     refreshSnapshots()
   }, [refreshSnapshots])
 
-  const findTerminalForWorkspace = useCallback(async () => {
-    const active = tabs.find((tab) => tab.id === activeTabId)
-    if (active?.type === 'terminal' && active.workspaceId === workspace.id) {
-      return active
-    }
-
-    const existing = workspaceTabs.find((tab) => tab.type === 'terminal')
-    if (existing?.type === 'terminal') {
-      setActiveWorkspace(workspace.id)
-      setActiveTab(existing.id)
-      return existing
-    }
-
-    setActiveWorkspace(workspace.id)
-    await createTerminalForActiveWorkspace()
-    const latest = useAppStore.getState()
-    const created = latest.tabs.find((tab) => tab.id === latest.activeTabId)
-    if (created?.type === 'terminal' && created.workspaceId === workspace.id) {
-      return created
-    }
-    return null
-  }, [
-    tabs,
-    activeTabId,
-    workspace.id,
-    workspaceTabs,
-    setActiveWorkspace,
-    setActiveTab,
-    createTerminalForActiveWorkspace,
-  ])
-
-  const sendTemplateToTerminal = useCallback(
+  const applyTemplate = useCallback(
     async (templateName: string, templateContent: string) => {
-      const terminal = await findTerminalForWorkspace()
-      if (!terminal) {
-        addToast({
-          id: crypto.randomUUID(),
-          message: 'Could not open a terminal for this workspace',
-          type: 'error',
-        })
-        return
-      }
-
       const expanded = await expandPromptTemplate(templateContent, workspace)
-      window.api.pty.write(terminal.ptyId, expanded)
       addToast({
         id: crypto.randomUUID(),
-        message: `Template "${templateName}" inserted into terminal`,
+        message: `Template "${templateName}" expanded (${expanded.length} chars)`,
         type: 'info',
       })
-      // Focus terminal so the user can press Enter immediately
-      setTimeout(() => {
-        const termEl = document.querySelector('[class*="terminalInner"] .xterm textarea') as HTMLElement | null
-        termEl?.focus()
-      }, 100)
     },
-    [findTerminalForWorkspace, addToast, workspace]
+    [addToast, workspace]
   )
 
   const handleCreateSnapshot = useCallback(async () => {
@@ -227,7 +170,7 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
                 key={template.id}
                 appearance="outline"
                 size="small"
-                onClick={() => sendTemplateToTerminal(template.name, template.content)}
+                onClick={() => applyTemplate(template.name, template.content)}
                 title={template.content}
               >
                 {template.name}

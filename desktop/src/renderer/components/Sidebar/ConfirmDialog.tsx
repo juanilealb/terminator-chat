@@ -14,11 +14,24 @@ interface Props {
   message: string
   confirmLabel?: string
   onConfirm: () => void
+  secondaryLabel?: string
+  onSecondary?: () => void
   onCancel: () => void
   destructive?: boolean
+  secondaryDestructive?: boolean
 }
 
-export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfirm, onCancel, destructive = false }: Props) {
+export function ConfirmDialog({
+  title,
+  message,
+  confirmLabel = 'Delete',
+  onConfirm,
+  secondaryLabel,
+  onSecondary,
+  onCancel,
+  destructive = false,
+  secondaryDestructive = false,
+}: Props) {
   const showShiftHint = confirmLabel.toLowerCase() === 'delete'
 
   return (
@@ -34,6 +47,15 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfi
           </DialogContent>
           <DialogActions>
             <Button appearance="secondary" onClick={onCancel}>Cancel</Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                appearance="secondary"
+                className={secondaryDestructive ? styles.destructiveBtn : undefined}
+                onClick={onSecondary}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
             <Button
               autoFocus
               appearance="primary"

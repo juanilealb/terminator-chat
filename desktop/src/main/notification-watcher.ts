@@ -5,8 +5,8 @@ import { IPC, type AgentActivitySnapshot, type AgentNotifyReason } from '../shar
 import { debugLog, getTempDir } from '@shared/platform'
 import { sendActivateWorkspace } from './ipc'
 
-const NOTIFY_DIR = join(getTempDir(), 'terminator-notify')
-const ACTIVITY_DIR = join(getTempDir(), 'terminator-activity')
+const NOTIFY_DIR = join(getTempDir(), 'terminator-chat-notify')
+const ACTIVITY_DIR = join(getTempDir(), 'terminator-chat-activity')
 const POLL_INTERVAL = 500
 const CLAUDE_MARKER_SUFFIX = '.claude'
 const CODEX_MARKER_SEGMENT = '.codex.'
@@ -271,7 +271,7 @@ export class NotificationWatcher {
       : `Agent completed in workspace ${workspaceId}`
 
     const notification = new Notification({
-      title: 'Terminator',
+      title: 'Terminator Chat',
       body,
       icon: getNotificationIcon(),
     })

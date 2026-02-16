@@ -12,6 +12,14 @@ export interface StartupCommand {
   command: string
 }
 
+export const PROJECT_OWNERSHIPS = ['personal', 'work'] as const
+export type ProjectOwnership = (typeof PROJECT_OWNERSHIPS)[number]
+export const DEFAULT_PROJECT_OWNERSHIP: ProjectOwnership = 'personal'
+
+export function parseProjectOwnership(value: unknown): ProjectOwnership {
+  return value === 'work' ? 'work' : 'personal'
+}
+
 export const WORKSPACE_TYPES = ['bug', 'feature', 'chore', 'refactor', 'docs', 'test', 'spike'] as const
 export type WorkspaceType = (typeof WORKSPACE_TYPES)[number]
 export const DEFAULT_WORKSPACE_TYPE: WorkspaceType = 'feature'
@@ -20,22 +28,11 @@ export function isWorkspaceType(value: unknown): value is WorkspaceType {
   return typeof value === 'string' && WORKSPACE_TYPES.includes(value as WorkspaceType)
 }
 
-export interface Automation {
-  id: string
-  name: string
-  projectId: string
-  prompt: string
-  cronExpression: string
-  enabled: boolean
-  createdAt: number
-  lastRunAt?: number
-  lastRunStatus?: 'success' | 'failed' | 'timeout'
-}
-
 export interface Project {
   id: string
   name: string
   repoPath: string
+  ownership?: ProjectOwnership
   startupCommands?: StartupCommand[]
   prLinkProvider?: PrLinkProvider
 }
@@ -48,7 +45,6 @@ export interface Workspace {
   worktreePath: string
   projectId: string
   agentPermissionMode: AgentPermissionMode
-  automationId?: string
   memory?: string
 }
 
@@ -63,12 +59,30 @@ export type Tab = {
   id: string
   workspaceId: string
 } & (
-  | { type: 'terminal'; title: string; ptyId: string }
+  | { type: 'chat'; title: string; threadId: string }
   | { type: 'file'; filePath: string; unsaved?: boolean }
   | { type: 'diff' }
 )
 
-export type RightPanelMode = 'files' | 'changes' | 'memory' | 'preview'
+export type ChatMessageType = 'text' | 'command' | 'file-change' | 'reasoning' | 'tool-call'
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  type: ChatMessageType
+  timestamp: number
+  metadata?: Record<string, unknown>
+}
+
+export interface ChatThread {
+  id: string
+  threadId: string | null
+  messages: ChatMessage[]
+  loading: boolean
+}
+
+export type RightPanelMode = 'files' | 'changes' | 'memory'
 
 export type PrLinkProvider = 'github' | 'graphite' | 'devinreview'
 
@@ -82,12 +96,11 @@ export interface Settings {
   themePreference: ThemePreference
   confirmOnClose: boolean
   autoSaveOnBlur: boolean
-  defaultShell: string
-  defaultShellArgs: string
+  defaultProjectOwnership: ProjectOwnership
+  githubPersonalLogin: string
+  githubWorkLogin: string
   restoreWorkspace: boolean
   diffInline: boolean
-  terminalFontSize: number
-  terminalCopyOnSelect: boolean
   editorFontSize: number
   promptTemplates: PromptTemplate[]
 }
@@ -96,12 +109,11 @@ export const DEFAULT_SETTINGS: Settings = {
   themePreference: 'system',
   confirmOnClose: true,
   autoSaveOnBlur: false,
-  defaultShell: '',
-  defaultShellArgs: '',
+  defaultProjectOwnership: DEFAULT_PROJECT_OWNERSHIP,
+  githubPersonalLogin: '',
+  githubWorkLogin: '',
   restoreWorkspace: true,
   diffInline: false,
-  terminalFontSize: 14,
-  terminalCopyOnSelect: false,
   editorFontSize: 13,
   promptTemplates: [
     {
@@ -129,6 +141,19 @@ export interface ConfirmDialogState {
   confirmLabel?: string
   destructive?: boolean
   onConfirm: () => void
+  secondaryLabel?: string
+  secondaryDestructive?: boolean
+  onSecondary?: () => void
+}
+
+export type NewThreadMode = 'existing' | 'new'
+
+export interface NewThreadDialogState {
+  open: boolean
+  projectId: string | null
+  mode: NewThreadMode
+  branch: string
+  baseBranch: string
 }
 
 export interface AppState {
@@ -136,7 +161,6 @@ export interface AppState {
   projects: Project[]
   workspaces: Workspace[]
   tabs: Tab[]
-  automations: Automation[]
   activeWorkspaceId: string | null
   activeTabId: string | null
   lastActiveTabByWorkspace: Record<string, string>
@@ -145,9 +169,10 @@ export interface AppState {
   sidebarCollapsed: boolean
   lastSavedTabId: string | null
   workspaceDialogProjectId: string | null
+  lastSelectedBranchByProject: Record<string, string>
+  newThreadDialog: NewThreadDialogState
   settings: Settings
   settingsOpen: boolean
-  automationsOpen: boolean
   confirmDialog: ConfirmDialogState | null
   toasts: Toast[]
   quickOpenVisible: boolean
@@ -160,7 +185,9 @@ export interface AppState {
   prStatusMap: Map<string, PrInfo | null>
   ghAvailability: Map<string, boolean>
   ghErrorMap: Map<string, GithubLookupError | undefined>
-  previewUrlByWorkspace: Record<string, string>
+  chatMessages: Record<string, ChatMessage[]>
+  codexLoggedIn: boolean
+  chatThread: ChatThread | null
 
   // Actions
   addProject: (project: Project) => void
@@ -176,7 +203,7 @@ export interface AppState {
   toggleSidebar: () => void
   nextTab: () => void
   prevTab: () => void
-  createTerminalForActiveWorkspace: () => Promise<void>
+  createChatForActiveWorkspace: () => Promise<void>
   openDirectory: (dirPath: string) => Promise<void>
   closeActiveTab: () => void
   setTabUnsaved: (tabId: string, unsaved: boolean) => void
@@ -187,17 +214,22 @@ export interface AppState {
   prevWorkspace: () => void
   switchToTabByIndex: (index: number) => void
   closeAllWorkspaceTabs: () => void
-  focusOrCreateTerminal: () => Promise<void>
+  focusOrCreateChat: () => Promise<void>
   openWorkspaceDialog: (projectId: string | null) => void
+  openNewThreadDialog: () => Promise<void>
+  closeNewThreadDialog: () => void
+  setNewThreadDialog: (partial: Partial<NewThreadDialogState>) => void
+  confirmNewThreadDialog: () => Promise<void>
+  setLastSelectedBranch: (projectId: string, branch: string) => void
   renameWorkspace: (id: string, name: string) => void
   updateWorkspaceBranch: (id: string, branch: string) => void
+  updateWorkspaceAgentPermissionMode: (id: string, mode: AgentPermissionMode) => void
   updateWorkspaceMemory: (id: string, memory: string) => void
   deleteWorkspace: (workspaceId: string) => Promise<void>
   updateProject: (id: string, partial: Partial<Omit<Project, 'id'>>) => void
   deleteProject: (projectId: string) => Promise<void>
   updateSettings: (partial: Partial<Settings>) => void
   toggleSettings: () => void
-  toggleAutomations: () => void
   showConfirmDialog: (dialog: ConfirmDialogState) => void
   dismissConfirmDialog: () => void
   addToast: (toast: Toast) => void
@@ -207,7 +239,12 @@ export interface AppState {
   toggleCommandPalette: () => void
   openCommandPalette: () => void
   closeCommandPalette: () => void
-  setPreviewUrl: (workspaceId: string, url: string) => void
+  // Chat actions
+  setCodexLoggedIn: (loggedIn: boolean) => void
+  setChatThread: (thread: ChatThread | null) => void
+  addChatMessage: (message: ChatMessage) => void
+  setChatLoading: (loading: boolean) => void
+  sendChatMessage: (threadId: string, content: string) => void
 
   // Unread indicator actions
   markWorkspaceUnread: (workspaceId: string) => void
@@ -221,11 +258,6 @@ export interface AppState {
   setPrStatuses: (projectId: string, statuses: Record<string, PrInfo | null>) => void
   setGhAvailability: (projectId: string, available: boolean, error?: GithubLookupError) => void
 
-  // Automation actions
-  addAutomation: (automation: Automation) => void
-  updateAutomation: (id: string, partial: Partial<Omit<Automation, 'id'>>) => void
-  removeAutomation: (id: string) => void
-
   // Hydration
   hydrateState: (data: PersistedState) => void
 
@@ -238,10 +270,10 @@ export interface PersistedState {
   projects: Project[]
   workspaces: Workspace[]
   tabs?: Tab[]
-  automations?: Automation[]
   activeWorkspaceId?: string | null
   activeTabId?: string | null
   lastActiveTabByWorkspace?: Record<string, string>
+  lastSelectedBranchByProject?: Record<string, string>
+  newThreadDialog?: Partial<NewThreadDialogState>
   settings?: Settings
-  previewUrlByWorkspace?: Record<string, string>
 }

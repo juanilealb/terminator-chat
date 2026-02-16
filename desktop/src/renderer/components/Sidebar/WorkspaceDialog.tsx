@@ -9,9 +9,7 @@ import {
   Button,
 } from '@fluentui/react-components'
 import {
-  DEFAULT_AGENT_PERMISSION_MODE,
   DEFAULT_WORKSPACE_TYPE,
-  type AgentPermissionMode,
   type Project,
   type WorkspaceType,
 } from '../../store/types'
@@ -34,7 +32,6 @@ interface Props {
     branch: string,
     newBranch: boolean,
     baseBranch: string | undefined,
-    agentPermissionMode: AgentPermissionMode,
   ) => void
   onCancel: () => void
   isCreating?: boolean
@@ -50,13 +47,12 @@ export function WorkspaceDialog({
   createProgressMessage = '',
   showSlowCreateMessage = false,
 }: Props) {
-  const [name, setName] = useState(`ws-${Date.now().toString(36)}`)
+  const [name, setName] = useState(`thread-${Date.now().toString(36)}`)
   const [branches, setBranches] = useState<string[]>([])
   const [selectedBranch, setSelectedBranch] = useState('')
   const [isNewBranch, setIsNewBranch] = useState(true)
   const [newBranchName, setNewBranchName] = useState('')
   const [workspaceType, setWorkspaceType] = useState<WorkspaceType>(DEFAULT_WORKSPACE_TYPE)
-  const [agentPermissionMode, setAgentPermissionMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [baseBranch, setBaseBranch] = useState('')
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -98,7 +94,6 @@ export function WorkspaceDialog({
       branch,
       isNewBranch,
       isNewBranch ? baseBranch : undefined,
-      agentPermissionMode,
     )
   }, [
     name,
@@ -109,7 +104,6 @@ export function WorkspaceDialog({
     baseBranch,
     onConfirm,
     isCreating,
-    agentPermissionMode,
   ])
 
   // Close pickers on click outside
@@ -136,7 +130,7 @@ export function WorkspaceDialog({
     <Dialog open onOpenChange={(_, data) => { if (!data.open && !isCreating) onCancel() }}>
       <DialogSurface className={styles.surface} onKeyDown={handleKeyDown}>
         <DialogBody>
-          <DialogTitle>New Workspace</DialogTitle>
+          <DialogTitle>New thread</DialogTitle>
           <DialogContent className={styles.content}>
             <label className={styles.label}>Name</label>
             <input
@@ -145,24 +139,8 @@ export function WorkspaceDialog({
               onChange={(e) => setName(e.target.value)}
               autoFocus
               disabled={isCreating}
-              placeholder="workspace-name"
+              placeholder="thread-name"
             />
-
-            <label className={styles.label}>Type</label>
-            <select
-              className={styles.input}
-              value={workspaceType}
-              onChange={(e) => setWorkspaceType(e.target.value as WorkspaceType)}
-              disabled={isCreating}
-            >
-              <option value="feature">Feature</option>
-              <option value="bug">Bug</option>
-              <option value="chore">Chore</option>
-              <option value="refactor">Refactor</option>
-              <option value="docs">Docs</option>
-              <option value="test">Test</option>
-              <option value="spike">Spike</option>
-            </select>
 
             <label className={styles.label}>Branch</label>
             <div className={styles.branchToggle}>
@@ -171,15 +149,18 @@ export function WorkspaceDialog({
                 onClick={() => setIsNewBranch(true)}
                 disabled={isCreating}
               >
-                New branch
+                Create branch
               </button>
               <button
                 className={`${styles.toggleBtn} ${!isNewBranch ? styles.active : ''}`}
                 onClick={() => setIsNewBranch(false)}
                 disabled={isCreating}
               >
-                Existing
+                Use existing
               </button>
+            </div>
+            <div className={styles.hint}>
+              Each thread stays bound to its branch.
             </div>
 
             {isNewBranch ? (
@@ -256,23 +237,10 @@ export function WorkspaceDialog({
               </div>
             )}
 
-            <label className={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={agentPermissionMode === 'full-permissions'}
-                onChange={(e) => setAgentPermissionMode(e.target.checked ? 'full-permissions' : 'default')}
-                disabled={isCreating}
-              />
-              <span>Full permissions for codex and claude</span>
-            </label>
-            <div className={styles.hint}>
-              Off keeps standard mode. On expands codex and claude to full permissions.
-            </div>
-
             {isCreating && (
               <div className={styles.createStatus} role="status" aria-live="polite">
                 <span className={styles.createSpinner} />
-                <span>{createProgressMessage || 'Creating workspace...'}</span>
+                <span>{createProgressMessage || 'Creating thread...'}</span>
               </div>
             )}
             {isCreating && showSlowCreateMessage && (
@@ -284,7 +252,7 @@ export function WorkspaceDialog({
           <DialogActions>
             <Button appearance="secondary" onClick={onCancel} disabled={isCreating}>Cancel</Button>
             <Button appearance="primary" onClick={handleSubmit} disabled={!name.trim() || isCreating}>
-              {isCreating ? 'Creating...' : 'Create'}
+              {isCreating ? 'Creating...' : 'Create thread'}
             </Button>
           </DialogActions>
         </DialogBody>

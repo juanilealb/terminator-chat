@@ -1,11 +1,12 @@
 {
-  "name": "terminator-root",
+  "name": "terminator-chat-root",
   "private": true,
   "scripts": {
     "postinstall": "bun install --cwd desktop",
     "setup": "bun install --cwd desktop && bun run --cwd desktop rebuild",
     "dev": "bun run --cwd desktop dev",
     "build": "bun run --cwd desktop build",
+    "bench:compare": "node desktop/scripts/benchmark-compare.mjs",
     "test": "bun run --cwd desktop test",
     "rebuild": "bun run --cwd desktop rebuild",
     "dist": "bun run --cwd desktop dist",

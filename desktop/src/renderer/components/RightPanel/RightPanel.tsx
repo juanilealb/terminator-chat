@@ -13,10 +13,9 @@ import { subscribeGitStatusChanged } from '../../utils/git-status-events'
 import { FileTree } from './FileTree'
 import { ChangedFiles } from './ChangedFiles'
 import { WorkspaceMemoryPanel } from './WorkspaceMemoryPanel'
-import { PreviewPanel } from './PreviewPanel'
 import styles from './RightPanel.module.css'
 
-type PanelMode = 'files' | 'changes' | 'memory' | 'preview'
+type PanelMode = 'files' | 'changes' | 'memory'
 
 export function RightPanel() {
   const {
@@ -24,15 +23,12 @@ export function RightPanel() {
     setRightPanelMode,
     activeWorkspaceId,
     workspaces,
-    previewUrlByWorkspace,
-    setPreviewUrl,
   } = useAppStore()
   const [changeCount, setChangeCount] = useState(0)
   const countSeqRef = useRef(0)
 
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
   const worktreePath = workspace?.worktreePath
-  const previewUrl = workspace ? (previewUrlByWorkspace[workspace.id] ?? '') : ''
 
   const refreshChangeCount = useCallback(async () => {
     if (!worktreePath) {
@@ -88,46 +84,42 @@ export function RightPanel() {
   return (
     <div className={styles.rightPanel}>
       <div className={styles.header}>
-        <TabList
-          selectedValue={rightPanelMode}
-          onTabSelect={handleTabSelect}
-          appearance="subtle"
-          size="small"
-          className={styles.tabList}
-        >
-          <Tab
-            value="files"
-            title={`Files (${formatShortcut(SHORTCUT_MAP.filesPanel.mac, SHORTCUT_MAP.filesPanel.win)})`}
+        <div className={styles.tabViewport}>
+          <TabList
+            selectedValue={rightPanelMode}
+            onTabSelect={handleTabSelect}
+            appearance="subtle"
+            size="small"
+            className={styles.tabList}
           >
-            Files
-          </Tab>
-          <Tab
-            value="changes"
-            title={`Changes (${formatShortcut(SHORTCUT_MAP.changesPanel.mac, SHORTCUT_MAP.changesPanel.win)})`}
-          >
-            Changes
-            {changeCount > 0 && (
-              <CounterBadge
-                count={changeCount}
-                size="small"
-                appearance="filled"
-                className={styles.badge}
-              />
-            )}
-          </Tab>
-          <Tab
-            value="memory"
-            title={`Memory (${formatShortcut(SHORTCUT_MAP.memoryPanel.mac, SHORTCUT_MAP.memoryPanel.win)})`}
-          >
-            Memory
-          </Tab>
-          <Tab
-            value="preview"
-            title={`Preview (${formatShortcut(SHORTCUT_MAP.previewPanel.mac, SHORTCUT_MAP.previewPanel.win)})`}
-          >
-            Preview
-          </Tab>
-        </TabList>
+            <Tab
+              value="files"
+              title={`Files (${formatShortcut(SHORTCUT_MAP.filesPanel.mac, SHORTCUT_MAP.filesPanel.win)})`}
+            >
+              Files
+            </Tab>
+            <Tab
+              value="changes"
+              title={`Changes (${formatShortcut(SHORTCUT_MAP.changesPanel.mac, SHORTCUT_MAP.changesPanel.win)})`}
+            >
+              Changes
+              {changeCount > 0 && (
+                <CounterBadge
+                  count={changeCount}
+                  size="small"
+                  appearance="filled"
+                  className={styles.badge}
+                />
+              )}
+            </Tab>
+            <Tab
+              value="memory"
+              title={`Memory (${formatShortcut(SHORTCUT_MAP.memoryPanel.mac, SHORTCUT_MAP.memoryPanel.win)})`}
+            >
+              Memory
+            </Tab>
+          </TabList>
+        </div>
       </div>
 
       <div className={styles.content}>
@@ -152,12 +144,6 @@ export function RightPanel() {
             </div>
             <div style={{ display: rightPanelMode === 'memory' ? 'contents' : 'none' }}>
               <WorkspaceMemoryPanel workspace={workspace} />
-            </div>
-            <div style={{ display: rightPanelMode === 'preview' ? 'contents' : 'none' }}>
-              <PreviewPanel
-                previewUrl={previewUrl}
-                onChangeUrl={(url) => setPreviewUrl(workspace.id, url)}
-              />
             </div>
           </>
         )}

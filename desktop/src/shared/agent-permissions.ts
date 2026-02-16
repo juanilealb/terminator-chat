@@ -2,7 +2,7 @@ export const AGENT_PERMISSION_MODES = ['default', 'full-permissions'] as const
 
 export type AgentPermissionMode = (typeof AGENT_PERMISSION_MODES)[number]
 
-export const DEFAULT_AGENT_PERMISSION_MODE: AgentPermissionMode = 'full-permissions'
+export const DEFAULT_AGENT_PERMISSION_MODE: AgentPermissionMode = 'default'
 
 export function isAgentPermissionMode(value: unknown): value is AgentPermissionMode {
   return typeof value === 'string' && AGENT_PERMISSION_MODES.includes(value as AgentPermissionMode)

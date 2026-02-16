@@ -1,5 +1,5 @@
-appId: com.terminator.app
-productName: Terminator
+appId: com.terminator-chat.app
+productName: Terminator Chat
 directories:
   buildResources: build
 files:

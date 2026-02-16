@@ -1,4 +1,5 @@
 @import './design-tokens.css';
+@import '@fontsource-variable/manrope';
 
 @font-face {
   font-family: 'Geist Sans';
@@ -40,6 +41,8 @@ body,
   line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'ss05' on;
+  font-variant-numeric: proportional-nums;
 }
 
 body {

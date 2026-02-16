@@ -1,0 +1,148 @@
+{
+  "generatedAt": "2026-02-16T00:29:52.756Z",
+  "iterations": 1,
+  "timeoutMs": 20000,
+  "firstWindowTimeoutMs": 60000,
+  "runsByApp": {
+    "terminator-fluent": [
+      {
+        "appId": "terminator-fluent",
+        "runIndex": 1,
+        "metrics": {
+          "launchMs": 1558.6686,
+          "projectAddUiMs": 98.9652,
+          "workspaceCreateMs": 1122.8464,
+          "terminalOpenUiMs": 344.5782,
+          "terminalEchoRttMs": 2585.8969,
+          "gitStatusMs": 67.2758,
+          "fileTreeMs": 61.4815
+        },
+        "notes": [],
+        "success": true
+      }
+    ],
+    "terminator": [
+      {
+        "appId": "terminator",
+        "runIndex": 1,
+        "metrics": {
+          "launchMs": 2358.5173,
+          "projectAddUiMs": 59.6502,
+          "workspaceCreateMs": 975.8099,
+          "terminalOpenUiMs": 583.3563,
+          "terminalEchoRttMs": 2952.0173,
+          "gitStatusMs": 64.8958,
+          "fileTreeMs": 53.2117
+        },
+        "notes": [],
+        "success": true
+      }
+    ]
+  },
+  "summary": {
+    "terminator-fluent": {
+      "launchMs": {
+        "count": 1,
+        "mean": 1558.6686,
+        "median": 1558.6686,
+        "min": 1558.6686,
+        "max": 1558.6686
+      },
+      "projectAddUiMs": {
+        "count": 1,
+        "mean": 98.9652,
+        "median": 98.9652,
+        "min": 98.9652,
+        "max": 98.9652
+      },
+      "workspaceCreateMs": {
+        "count": 1,
+        "mean": 1122.8464,
+        "median": 1122.8464,
+        "min": 1122.8464,
+        "max": 1122.8464
+      },
+      "terminalOpenUiMs": {
+        "count": 1,
+        "mean": 344.5782,
+        "median": 344.5782,
+        "min": 344.5782,
+        "max": 344.5782
+      },
+      "terminalEchoRttMs": {
+        "count": 1,
+        "mean": 2585.8969,
+        "median": 2585.8969,
+        "min": 2585.8969,
+        "max": 2585.8969
+      },
+      "gitStatusMs": {
+        "count": 1,
+        "mean": 67.2758,
+        "median": 67.2758,
+        "min": 67.2758,
+        "max": 67.2758
+      },
+      "fileTreeMs": {
+        "count": 1,
+        "mean": 61.4815,
+        "median": 61.4815,
+        "min": 61.4815,
+        "max": 61.4815
+      },
+      "failures": 0
+    },
+    "terminator": {
+      "launchMs": {
+        "count": 1,
+        "mean": 2358.5173,
+        "median": 2358.5173,
+        "min": 2358.5173,
+        "max": 2358.5173
+      },
+      "projectAddUiMs": {
+        "count": 1,
+        "mean": 59.6502,
+        "median": 59.6502,
+        "min": 59.6502,
+        "max": 59.6502
+      },
+      "workspaceCreateMs": {
+        "count": 1,
+        "mean": 975.8099,
+        "median": 975.8099,
+        "min": 975.8099,
+        "max": 975.8099
+      },
+      "terminalOpenUiMs": {
+        "count": 1,
+        "mean": 583.3563,
+        "median": 583.3563,
+        "min": 583.3563,
+        "max": 583.3563
+      },
+      "terminalEchoRttMs": {
+        "count": 1,
+        "mean": 2952.0173,
+        "median": 2952.0173,
+        "min": 2952.0173,
+        "max": 2952.0173
+      },
+      "gitStatusMs": {
+        "count": 1,
+        "mean": 64.8958,
+        "median": 64.8958,
+        "min": 64.8958,
+        "max": 64.8958
+      },
+      "fileTreeMs": {
+        "count": 1,
+        "mean": 53.2117,
+        "median": 53.2117,
+        "min": 53.2117,
+        "max": 53.2117
+      },
+      "failures": 0
+    }
+  }
+}

@@ -1,14 +1,14 @@
 !macro customInstall
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Terminator" "" "Open in Terminator"
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Terminator" "Icon" "$INSTDIR\Terminator.exe"
-  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\Terminator\command" "" '$\"$INSTDIR\Terminator.exe$\" $\"%V$\"'
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TerminatorChat" "" "Open in Terminator Chat"
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TerminatorChat" "Icon" "$INSTDIR\Terminator Chat.exe"
+  WriteRegStr HKCU "Software\Classes\Directory\Background\shell\TerminatorChat\command" "" '$\"$INSTDIR\Terminator Chat.exe$\" $\"%V$\"'
 
-  WriteRegStr HKCU "Software\Classes\Directory\shell\Terminator" "" "Open in Terminator"
-  WriteRegStr HKCU "Software\Classes\Directory\shell\Terminator" "Icon" "$INSTDIR\Terminator.exe"
-  WriteRegStr HKCU "Software\Classes\Directory\shell\Terminator\command" "" '$\"$INSTDIR\Terminator.exe$\" $\"%V$\"'
+  WriteRegStr HKCU "Software\Classes\Directory\shell\TerminatorChat" "" "Open in Terminator Chat"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\TerminatorChat" "Icon" "$INSTDIR\Terminator Chat.exe"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\TerminatorChat\command" "" '$\"$INSTDIR\Terminator Chat.exe$\" $\"%V$\"'
 !macroend
 
 !macro customUnInstall
-  DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\Terminator"
-  DeleteRegKey HKCU "Software\Classes\Directory\shell\Terminator"
+  DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\TerminatorChat"
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\TerminatorChat"
 !macroend

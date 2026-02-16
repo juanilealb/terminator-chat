@@ -49,7 +49,7 @@ export interface ShipToMainResult {
   prCreated: boolean
 }
 
-const SNAPSHOT_PREFIX = '[terminator:snapshot]'
+const SNAPSHOT_PREFIX = '[terminator-chat:snapshot]'
 
 export interface PrWorktreeResult {
   worktreePath: string

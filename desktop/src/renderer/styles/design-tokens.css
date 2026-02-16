@@ -46,7 +46,7 @@
   --accent-green-dim: var(--glow-green);
   --accent-red-dim: var(--glow-red);
 
-  /* Terminal */
+  /* Chat / Terminal colors */
   --term-bg: #140f16;
   --term-fg: #f0eaf4;
   --term-cursor: #63d4d9;
@@ -69,14 +69,14 @@
   --term-bright-white: #fff8ff;
 
   /* Typography */
-  --font-sans: 'Geist Sans', 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-sans: 'Manrope Variable', 'Manrope', 'Geist Sans', 'Inter', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Geist Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
   --font-ui: var(--font-sans);
 
   --font-size-xs: 11px;
-  --font-size-sm: 12px;
-  --font-size-base: 13px;
-  --font-size-md: 14px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
   --font-size-lg: 16px;
   --font-size-xl: 20px;
 

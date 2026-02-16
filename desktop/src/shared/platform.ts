@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import { tmpdir } from 'os'
 
 export const isWindows = true
-const DEBUG_PREFIX = '[Terminator]'
+const DEBUG_PREFIX = '[Terminator Chat]'
 let cachedDebugEnabled: boolean | null = null
 let cachedDefaultShellProfile: ShellProfile | null = null
 let didLogShellResolution = false
@@ -19,7 +19,7 @@ export function isDebugLoggingEnabled(): boolean {
   cachedDebugEnabled =
     typeof process !== 'undefined'
     && !!process.env
-    && process.env.TERMINATOR_DEBUG === '1'
+    && process.env.TERMINATOR_CHAT_DEBUG === '1'
   return cachedDebugEnabled
 }
 

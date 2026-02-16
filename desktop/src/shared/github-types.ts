@@ -34,3 +34,9 @@ export interface ListOpenPrsResult {
   error?: GithubLookupError
   data: OpenPrInfo[]
 }
+
+export interface GithubAuthAccountsResult {
+  available: boolean
+  error?: GithubLookupError
+  data: string[]
+}

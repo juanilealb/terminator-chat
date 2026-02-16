@@ -47,15 +47,6 @@ export const IPC = {
   GIT_RESTORE_SNAPSHOT: 'git:restore-snapshot',
   GIT_DROP_SNAPSHOT: 'git:drop-snapshot',
 
-  // PTY operations
-  PTY_CREATE: 'pty:create',
-  PTY_WRITE: 'pty:write',
-  PTY_RESIZE: 'pty:resize',
-  PTY_DESTROY: 'pty:destroy',
-  PTY_LIST: 'pty:list',
-  PTY_REATTACH: 'pty:reattach',
-  PTY_DATA: 'pty:data', // prefix for events: `pty:data:{id}`
-
   // File operations
   FS_GET_TREE: 'fs:get-tree',
   FS_GET_TREE_WITH_STATUS: 'fs:get-tree-with-status',
@@ -77,6 +68,8 @@ export const IPC = {
   APP_WINDOW_CLOSE: 'app:window-close',
   APP_WINDOW_IS_MAXIMIZED: 'app:window-is-maximized',
   APP_WINDOW_MAXIMIZED_CHANGED: 'app:window-maximized-changed',
+  APP_OPEN_IN_VSCODE: 'app:open-in-vscode',
+  APP_OPEN_IN_CURSOR: 'app:open-in-cursor',
   ACTIVATE_WORKSPACE: 'app:activate-workspace',
   THEME_CHANGED: 'theme:changed',
 
@@ -93,18 +86,21 @@ export const IPC = {
   CODEX_UNINSTALL_NOTIFY: 'codex:uninstall-notify',
   CODEX_CHECK_NOTIFY: 'codex:check-notify',
 
-  // Automation operations
-  AUTOMATION_CREATE: 'automation:create',
-  AUTOMATION_UPDATE: 'automation:update',
-  AUTOMATION_DELETE: 'automation:delete',
-  AUTOMATION_LIST: 'automation:list',
-  AUTOMATION_RUN_NOW: 'automation:run-now',
-  AUTOMATION_STOP: 'automation:stop',
-  AUTOMATION_RUN_STARTED: 'automation:run-started',
+  // Chat / Codex SDK
+  CHAT_LOGIN: 'chat:login',
+  CHAT_LOGOUT: 'chat:logout',
+  CHAT_AUTH_STATUS: 'chat:auth-status',
+  CHAT_LIST_MODELS: 'chat:list-models',
+  CHAT_CREATE_THREAD: 'chat:create-thread',
+  CHAT_SEND: 'chat:send',
+  CHAT_CANCEL: 'chat:cancel',
+  CHAT_EVENT: 'chat:event',
+  CHAT_RESUME: 'chat:resume',
 
   // GitHub operations
   GITHUB_GET_PR_STATUSES: 'github:get-pr-statuses',
   GITHUB_LIST_OPEN_PRS: 'github:list-open-prs',
+  GITHUB_LIST_AUTH_ACCOUNTS: 'github:list-auth-accounts',
 
   // Clipboard operations
   CLIPBOARD_SAVE_IMAGE: 'clipboard:save-image',

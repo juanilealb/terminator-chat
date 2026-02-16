@@ -28,8 +28,14 @@ let pendingDirectoryToOpen = extractDirectoryFromArgv(process.argv)
 let pendingThemePayload: ThemeChangedPayload | null = null
 let waitingForRendererLoad = false
 let themeUpdatedHandler: (() => void) | null = null
-const allowMultiInstance = process.env.CI_TEST === '1' || process.env.TERMINATOR_ALLOW_MULTI_INSTANCE === '1'
-const customProfileName = process.env.TERMINATOR_PROFILE?.trim()
+const allowMultiInstance = process.env.CI_TEST === '1' || process.env.TERMINATOR_CHAT_ALLOW_MULTI_INSTANCE === '1'
+const customProfileName = process.env.TERMINATOR_CHAT_PROFILE?.trim()
+
+// In dev, Vite requires relaxed CSP directives (`unsafe-eval`) and Electron prints
+// a known warning on every run. Keep production warnings intact.
+if (process.env.ELECTRON_RENDERER_URL) {
+  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true'
+}
 
 function setMainWindowProgress(progress: CreateWorktreeProgressEvent): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -179,7 +185,7 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false, // needed for node-pty IPC
+      sandbox: false,
       backgroundThrottling: false,
     },
   }
@@ -225,6 +231,11 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
+  // Open DevTools in dev mode for debugging
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.webContents.openDevTools()
+  }
+
   mainWindow.webContents.on('did-finish-load', () => {
     notifyWindowMaximizedChanged()
   })
@@ -232,9 +243,9 @@ function createWindow(): void {
   schedulePendingWindowCommandFlush()
 }
 
-app.setName('Terminator')
+app.setName('Terminator Chat')
 if (process.platform === 'win32') {
-  app.setAppUserModelId('com.terminator.app')
+  app.setAppUserModelId('com.terminator-chat.app')
 }
 
 app.commandLine.appendSwitch('enable-gpu-rasterization')
@@ -244,7 +255,7 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding')
 
 if (customProfileName) {
   const safeProfileName = customProfileName.replace(/[^a-zA-Z0-9_-]/g, '-')
-  app.setPath('userData', join(app.getPath('appData'), `Terminator-${safeProfileName}`))
+  app.setPath('userData', join(app.getPath('appData'), `TerminatorChat-${safeProfileName}`))
 }
 
 const hasSingleInstanceLock = allowMultiInstance ? true : app.requestSingleInstanceLock()
@@ -261,17 +272,17 @@ function setupWindowsJumpList(): void {
       items: [
         {
           type: 'task',
-          title: 'New Terminal',
-          description: 'Start Terminator and open a new terminal',
+          title: 'New Chat',
+          description: 'Start Terminator Chat and open a new chat',
           program: process.execPath,
-          args: '--jump-new-terminal',
+          args: '--jump-new-chat',
           iconPath: process.execPath,
           iconIndex: 0,
         },
         {
           type: 'task',
           title: 'Open Project',
-          description: 'Start Terminator and open the project picker',
+          description: 'Start Terminator Chat and open the project picker',
           program: process.execPath,
           args: '--jump-open-project',
           iconPath: process.execPath,
@@ -286,7 +297,7 @@ function setupWindowsJumpList(): void {
 if (process.env.CI_TEST) {
   const { mkdtempSync } = require('fs')
   const { join } = require('path')
-  const testData = mkdtempSync(join(require('os').tmpdir(), 'terminator-test-'))
+  const testData = mkdtempSync(join(require('os').tmpdir(), 'terminator-chat-test-'))
   app.setPath('userData', testData)
 }
 

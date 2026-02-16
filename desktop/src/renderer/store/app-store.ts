@@ -2,72 +2,50 @@ import { create } from 'zustand'
 import type { AppState, PersistedState, Tab } from './types'
 import {
   DEFAULT_AGENT_PERMISSION_MODE,
+  DEFAULT_PROJECT_OWNERSHIP,
   DEFAULT_SETTINGS,
   DEFAULT_WORKSPACE_TYPE,
+  parseProjectOwnership,
   parseAgentPermissionMode,
   isWorkspaceType,
 } from './types'
 
 const DEFAULT_PR_LINK_PROVIDER = 'github' as const
+const DEFAULT_FALLBACK_BRANCH = 'main'
 
-function parseShellArgs(raw: string): string[] | undefined {
-  const input = raw.trim()
-  if (!input) return undefined
-
-  const args: string[] = []
-  let current = ''
-  let quote: '"' | "'" | null = null
-  let escaping = false
-
-  for (const ch of input) {
-    if (escaping) {
-      current += ch
-      escaping = false
-      continue
-    }
-
-    if (ch === '\\' && quote === '"') {
-      escaping = true
-      continue
-    }
-
-    if (quote) {
-      if (ch === quote) {
-        quote = null
-      } else {
-        current += ch
-      }
-      continue
-    }
-
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      continue
-    }
-
-    if (/\s/.test(ch)) {
-      if (current) {
-        args.push(current)
-        current = ''
-      }
-      continue
-    }
-
-    current += ch
-  }
-
-  if (escaping) current += '\\'
-  if (current) args.push(current)
-  return args.length > 0 ? args : undefined
+function normalizeBranchName(input: string): string {
+  return input.trim().replace(/^origin\//, '').replace(/^refs\/heads\//, '')
 }
 
-function shellOverrides(settings: { defaultShell: string; defaultShellArgs: string }): {
-  shell?: string
-  args?: string[]
-} {
-  const shell = settings.defaultShell.trim() || undefined
-  const args = parseShellArgs(settings.defaultShellArgs)
-  return { shell, args }
+function toWorktreeName(branch: string): string {
+  const normalized = branch
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return normalized || 'thread'
+}
+
+function uniqueWorkspaceName(baseName: string, projectId: string, workspaces: Array<{ projectId: string; name: string }>): string {
+  const normalized = baseName.trim() || 'thread'
+  const used = new Set(
+    workspaces
+      .filter((ws) => ws.projectId === projectId)
+      .map((ws) => ws.name.toLowerCase()),
+  )
+  if (!used.has(normalized.toLowerCase())) return normalized
+
+  let suffix = 2
+  while (used.has(`${normalized}-${suffix}`.toLowerCase())) {
+    suffix += 1
+  }
+  return `${normalized}-${suffix}`
+}
+
+function nextThreadTitle(tabs: Tab[], workspaceId: string): string {
+  const count = tabs.filter((tab) => tab.workspaceId === workspaceId && tab.type === 'chat').length
+  return `Thread ${count + 1}`
 }
 
 function basenameFromPath(dirPath: string): string {
@@ -86,7 +64,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   projects: [],
   workspaces: [],
   tabs: [],
-  automations: [],
   activeWorkspaceId: null,
   activeTabId: null,
   lastActiveTabByWorkspace: {},
@@ -95,9 +72,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarCollapsed: false,
   lastSavedTabId: null,
   workspaceDialogProjectId: null,
+  lastSelectedBranchByProject: {},
+  newThreadDialog: {
+    open: false,
+    projectId: null,
+    mode: 'existing',
+    branch: '',
+    baseBranch: DEFAULT_FALLBACK_BRANCH,
+  },
   settings: { ...DEFAULT_SETTINGS },
   settingsOpen: false,
-  automationsOpen: false,
   confirmDialog: null,
   toasts: [],
   quickOpenVisible: false,
@@ -110,7 +94,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   prStatusMap: new Map(),
   ghAvailability: new Map(),
   ghErrorMap: new Map(),
-  previewUrlByWorkspace: {},
+  chatMessages: {},
+  codexLoggedIn: false,
+  chatThread: null,
 
   addProject: (project) =>
     set((s) => ({
@@ -118,6 +104,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...s.projects,
         {
           ...project,
+          ownership: parseProjectOwnership(project.ownership ?? s.settings.defaultProjectOwnership),
           prLinkProvider: project.prLinkProvider ?? DEFAULT_PR_LINK_PROVIDER,
         },
       ],
@@ -125,14 +112,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   removeProject: (id) =>
     set((s) => {
-      // Clean up automations for this project in main process
-      const projectAutomations = s.automations.filter((a) => a.projectId === id)
-      for (const a of projectAutomations) {
-        window.api.automations.delete(a.id)
-      }
       const removedWsIds = new Set(s.workspaces.filter((w) => w.projectId === id).map((w) => w.id))
       const tabMap = { ...s.lastActiveTabByWorkspace }
-      const previewUrlByWorkspace = { ...s.previewUrlByWorkspace }
       const unreadWorkspaceIds = new Set(
         Array.from(s.unreadWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
       )
@@ -143,18 +124,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         Array.from(s.waitingClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
       )
       for (const wsId of removedWsIds) delete tabMap[wsId]
-      for (const wsId of removedWsIds) delete previewUrlByWorkspace[wsId]
       return {
         projects: s.projects.filter((p) => p.id !== id),
         workspaces: s.workspaces.filter((w) => w.projectId !== id),
-        automations: s.automations.filter((a) => a.projectId !== id),
         unreadWorkspaceIds,
         activeClaudeWorkspaceIds,
         waitingClaudeWorkspaceIds,
         runningAgentCount: activeClaudeWorkspaceIds.size,
         waitingAgentCount: waitingClaudeWorkspaceIds.size,
         lastActiveTabByWorkspace: tabMap,
-        previewUrlByWorkspace,
       }
     }),
 
@@ -175,9 +153,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       newActiveClaude.delete(id)
       newWaitingClaude.delete(id)
       const tabMap = { ...s.lastActiveTabByWorkspace }
-      const previewUrlByWorkspace = { ...s.previewUrlByWorkspace }
       delete tabMap[id]
-      delete previewUrlByWorkspace[id]
       return {
         workspaces: newWorkspaces,
         tabs: newTabs,
@@ -187,7 +163,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         runningAgentCount: newActiveClaude.size,
         waitingAgentCount: newWaitingClaude.size,
         lastActiveTabByWorkspace: tabMap,
-        previewUrlByWorkspace,
         activeWorkspaceId:
           s.activeWorkspaceId === id
             ? newWorkspaces[0]?.id ?? null
@@ -207,6 +182,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateWorkspaceBranch: (id, branch) =>
     set((s) => ({
       workspaces: s.workspaces.map((w) => w.id === id ? { ...w, branch } : w),
+    })),
+
+  updateWorkspaceAgentPermissionMode: (id, mode) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => w.id === id ? { ...w, agentPermissionMode: mode } : w),
     })),
 
   updateWorkspaceMemory: (id, memory) =>
@@ -283,7 +263,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ activeTabId: prev.id })
   },
 
-  createTerminalForActiveWorkspace: async () => {
+  createChatForActiveWorkspace: async () => {
     let s = get()
     let workspaceId = s.activeWorkspaceId
     let ws = workspaceId ? s.workspaces.find((w) => w.id === workspaceId) : undefined
@@ -307,7 +287,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         try {
           branch = await window.api.git.getCurrentBranch(dirPath)
         } catch {
-          // Non-git directories are still valid for ad-hoc terminals.
+          // Non-git directories are still valid.
         }
 
         let project = s.projects.find((p) => p.repoPath === dirPath)
@@ -316,6 +296,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             id: crypto.randomUUID(),
             name: baseName,
             repoPath: dirPath,
+            ownership: s.settings.defaultProjectOwnership ?? DEFAULT_PROJECT_OWNERSHIP,
           }
           get().addProject(project)
         }
@@ -340,20 +321,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     if (!workspaceId || !ws) return
 
-    const { shell, args } = shellOverrides(s.settings)
-    const ptyId = await window.api.pty.create(ws.worktreePath, shell, args, {
-      AGENT_ORCH_WS_ID: ws.id,
-      AGENT_ORCH_PERMISSION_MODE: ws.agentPermissionMode,
-    })
-    const wsTabs = s.tabs.filter((t) => t.workspaceId === workspaceId)
-    const termCount = wsTabs.filter((t) => t.type === 'terminal').length
-
     get().addTab({
       id: crypto.randomUUID(),
       workspaceId,
-      type: 'terminal',
-      title: `Terminal ${termCount + 1}`,
-      ptyId,
+      type: 'chat',
+      title: nextThreadTitle(get().tabs, workspaceId),
+      threadId: crypto.randomUUID(),
     })
   },
 
@@ -367,7 +340,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const latest = get()
       const wsTabs = latest.tabs.filter((t) => t.workspaceId === existingWorkspace.id)
       if (wsTabs.length === 0) {
-        await latest.createTerminalForActiveWorkspace()
+        await latest.createChatForActiveWorkspace()
       } else {
         latest.setActiveTab(wsTabs[wsTabs.length - 1].id)
       }
@@ -377,10 +350,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const baseName = basenameFromPath(validDirPath) || validDirPath
     let project = get().projects.find((p) => p.repoPath === validDirPath)
     if (!project) {
+      const nextSettings = get().settings
       project = {
         id: crypto.randomUUID(),
         name: baseName,
         repoPath: validDirPath,
+        ownership: nextSettings.defaultProjectOwnership ?? DEFAULT_PROJECT_OWNERSHIP,
       }
       get().addProject(project)
     }
@@ -394,7 +369,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         branch = await window.api.git.getCurrentBranch(validDirPath)
       } catch {
-        // Non-git directories are valid for ad-hoc terminals.
+        // Non-git directories are valid.
       }
 
       workspace = {
@@ -415,11 +390,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const latest = get()
     const workspaceTabs = latest.tabs.filter((t) => t.workspaceId === workspace.id)
     if (workspaceTabs.length === 0) {
-      await latest.createTerminalForActiveWorkspace()
+      await latest.createChatForActiveWorkspace()
       return
     }
-    const terminalTab = workspaceTabs.find((t) => t.type === 'terminal')
-    latest.setActiveTab((terminalTab ?? workspaceTabs[0]).id)
+    const chatTab = workspaceTabs.find((t) => t.type === 'chat')
+    latest.setActiveTab((chatTab ?? workspaceTabs[0]).id)
   },
 
   closeActiveTab: () => {
@@ -431,9 +406,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const latest = get()
       const latestTab = latest.tabs.find((t) => t.id === tab.id)
       if (!latestTab) return
-      if (latestTab.type === 'terminal') {
-        window.api.pty.destroy(latestTab.ptyId)
-      }
       latest.removeTab(latestTab.id)
     }
 
@@ -526,10 +498,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const latest = get()
       const wsId = latest.activeWorkspaceId
       if (!wsId) return
-      const wsTabs = latest.tabs.filter((t) => t.workspaceId === wsId)
-      wsTabs.forEach((t) => {
-        if (t.type === 'terminal') window.api.pty.destroy(t.ptyId)
-      })
       set((state) => ({
         tabs: state.tabs.filter((t) => t.workspaceId !== wsId),
         activeTabId: null,
@@ -555,31 +523,243 @@ export const useAppStore = create<AppState>((set, get) => ({
     closeTabs()
   },
 
-  focusOrCreateTerminal: async () => {
+  focusOrCreateChat: async () => {
     const s = get()
     const wsTabs = s.activeWorkspaceId
       ? s.tabs.filter((t) => t.workspaceId === s.activeWorkspaceId)
       : []
-    const termTab = wsTabs.find((t) => t.type === 'terminal')
-    if (termTab) {
-      set({ activeTabId: termTab.id })
+    const chatTab = wsTabs.find((t) => t.type === 'chat')
+    if (chatTab) {
+      set({ activeTabId: chatTab.id })
     } else {
-      await get().createTerminalForActiveWorkspace()
+      await get().createChatForActiveWorkspace()
     }
   },
 
   openWorkspaceDialog: (projectId) => set({ workspaceDialogProjectId: projectId }),
+
+  openNewThreadDialog: async () => {
+    const s = get()
+    const hintedProject = s.newThreadDialog.projectId
+      ? s.projects.find((project) => project.id === s.newThreadDialog.projectId)
+      : undefined
+    const activeWorkspace = s.activeWorkspaceId
+      ? s.workspaces.find((workspace) => workspace.id === s.activeWorkspaceId)
+      : undefined
+    const activeProject = activeWorkspace
+      ? s.projects.find((project) => project.id === activeWorkspace.projectId)
+      : undefined
+    const project = hintedProject ?? activeProject ?? (s.projects.length === 1 ? s.projects[0] : undefined)
+
+    if (!project) {
+      get().addToast({ id: crypto.randomUUID(), message: 'Select a project first', type: 'info' })
+      return
+    }
+
+    let targetBranch = 'main'
+    try {
+      const branches = await window.api.git.getBranches(project.repoPath)
+      const normalized = new Set(branches.map((branch) => normalizeBranchName(branch)).filter(Boolean))
+      if (!normalized.has('main')) {
+        const fallback = normalizeBranchName(await window.api.git.getDefaultBranch(project.repoPath))
+        if (fallback) targetBranch = fallback
+      }
+    } catch {
+      // Keep main as default when branch lookup fails.
+    }
+
+    set({
+      workspaceDialogProjectId: null,
+      newThreadDialog: {
+        open: false,
+        projectId: project.id,
+        mode: 'existing',
+        branch: targetBranch,
+        baseBranch: targetBranch,
+      },
+    })
+    await get().confirmNewThreadDialog()
+  },
+
+  closeNewThreadDialog: () =>
+    set((s) => ({
+      newThreadDialog: {
+        ...s.newThreadDialog,
+        open: false,
+      },
+    })),
+
+  setNewThreadDialog: (partial) =>
+    set((s) => ({
+      newThreadDialog: {
+        ...s.newThreadDialog,
+        ...partial,
+      },
+    })),
+
+  confirmNewThreadDialog: async () => {
+    const s = get()
+    const dialog = s.newThreadDialog
+    if (!dialog.projectId) return
+
+    const project = s.projects.find((entry) => entry.id === dialog.projectId)
+    if (!project) {
+      get().addToast({ id: crypto.randomUUID(), message: 'Project not found', type: 'error' })
+      return
+    }
+
+    const branch = normalizeBranchName(dialog.branch)
+    if (!branch) {
+      get().addToast({ id: crypto.randomUUID(), message: 'Branch is required', type: 'error' })
+      return
+    }
+
+    const baseBranch = normalizeBranchName(dialog.baseBranch) || DEFAULT_FALLBACK_BRANCH
+    const mode = dialog.mode === 'new' ? 'new' : 'existing'
+    let workspace = s.workspaces.find((entry) => entry.projectId === project.id && entry.branch === branch)
+
+    if (!workspace) {
+      const workspaceName = uniqueWorkspaceName(
+        toWorktreeName(branch),
+        project.id,
+        s.workspaces,
+      )
+
+      // If branch is already checked out in the main repo path, reuse that context
+      // instead of attempting to create a duplicate worktree for the same branch.
+      if (mode === 'existing') {
+        let projectCurrentBranch = ''
+        try {
+          projectCurrentBranch = normalizeBranchName(await window.api.git.getCurrentBranch(project.repoPath))
+        } catch {
+          projectCurrentBranch = ''
+        }
+
+        if (projectCurrentBranch === branch) {
+          const repoWorkspace = s.workspaces.find(
+            (entry) => entry.projectId === project.id && entry.worktreePath === project.repoPath,
+          )
+          if (repoWorkspace) {
+            if (repoWorkspace.branch !== branch) {
+              get().updateWorkspaceBranch(repoWorkspace.id, branch)
+            }
+            workspace = repoWorkspace
+            get().setActiveWorkspace(repoWorkspace.id)
+          } else {
+            workspace = {
+              id: crypto.randomUUID(),
+              name: workspaceName,
+              type: DEFAULT_WORKSPACE_TYPE,
+              branch,
+              worktreePath: project.repoPath,
+              projectId: project.id,
+              agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+              memory: '',
+            }
+            get().addWorkspace(workspace)
+          }
+        }
+      }
+
+      if (!workspace) {
+        try {
+          const worktreePath = await window.api.git.createWorktree(
+            project.repoPath,
+            workspaceName,
+            branch,
+            mode === 'new',
+            mode === 'new' ? baseBranch : undefined,
+          )
+          workspace = {
+            id: crypto.randomUUID(),
+            name: workspaceName,
+            type: DEFAULT_WORKSPACE_TYPE,
+            branch,
+            worktreePath,
+            projectId: project.id,
+            agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+            memory: '',
+          }
+          get().addWorkspace(workspace)
+        } catch (err) {
+          const msg = formatUserError(err, 'Failed to create worktree')
+
+          // If git says the branch is already checked out in another worktree,
+          // adopt that existing context instead of failing the thread creation.
+          if (msg === 'BRANCH_CHECKED_OUT' && mode === 'existing') {
+            try {
+              const listed = await window.api.git.listWorktrees(project.repoPath)
+              const matchingWorktree = listed.find(
+                (entry) => normalizeBranchName(entry.branch) === branch && entry.path,
+              )
+
+              if (matchingWorktree) {
+                const existingByPath = s.workspaces.find(
+                  (entry) =>
+                    entry.projectId === project.id &&
+                    entry.worktreePath.toLowerCase() === matchingWorktree.path.toLowerCase(),
+                )
+
+                if (existingByPath) {
+                  if (existingByPath.branch !== branch) {
+                    get().updateWorkspaceBranch(existingByPath.id, branch)
+                  }
+                  workspace = existingByPath
+                  get().setActiveWorkspace(existingByPath.id)
+                } else {
+                  workspace = {
+                    id: crypto.randomUUID(),
+                    name: workspaceName,
+                    type: DEFAULT_WORKSPACE_TYPE,
+                    branch,
+                    worktreePath: matchingWorktree.path,
+                    projectId: project.id,
+                    agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+                    memory: '',
+                  }
+                  get().addWorkspace(workspace)
+                }
+              }
+            } catch {
+              // keep default error path below if we could not recover
+            }
+          }
+
+          if (!workspace) {
+            get().addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
+            return
+          }
+        }
+      }
+    } else {
+      get().setActiveWorkspace(workspace.id)
+    }
+
+    const latest = get()
+    latest.addTab({
+      id: crypto.randomUUID(),
+      workspaceId: workspace.id,
+      type: 'chat',
+      title: nextThreadTitle(latest.tabs, workspace.id),
+      threadId: crypto.randomUUID(),
+    })
+    latest.setLastSelectedBranch(project.id, branch)
+    latest.closeNewThreadDialog()
+  },
+
+  setLastSelectedBranch: (projectId, branch) =>
+    set((s) => ({
+      lastSelectedBranchByProject: {
+        ...s.lastSelectedBranchByProject,
+        [projectId]: normalizeBranchName(branch),
+      },
+    })),
 
   deleteWorkspace: async (workspaceId) => {
     const s = get()
     const ws = s.workspaces.find((w) => w.id === workspaceId)
     if (!ws) return
     const project = s.projects.find((p) => p.id === ws.projectId)
-
-    // Destroy PTYs for this workspace
-    s.tabs.filter((t) => t.workspaceId === workspaceId && t.type === 'terminal').forEach((t) => {
-      if (t.type === 'terminal') window.api.pty.destroy(t.ptyId)
-    })
 
     // Remove from state immediately so sidebar updates
     get().removeWorkspace(workspaceId)
@@ -606,11 +786,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!project) return
     const projectWorkspaces = s.workspaces.filter((w) => w.projectId === projectId)
 
-    // Destroy PTYs and remove worktrees for all workspaces in this project
+    // Remove worktrees for all workspaces in this project
     for (const ws of projectWorkspaces) {
-      s.tabs.filter((t) => t.workspaceId === ws.id && t.type === 'terminal').forEach((t) => {
-        if (t.type === 'terminal') window.api.pty.destroy(t.ptyId)
-      })
       if (ws.worktreePath !== project.repoPath) {
         try {
           await window.api.git.removeWorktree(project.repoPath, ws.worktreePath)
@@ -627,8 +804,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateSettings: (partial) =>
     set((s) => ({ settings: { ...s.settings, ...partial } })),
 
-  toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen, automationsOpen: false })),
-  toggleAutomations: () => set((s) => ({ automationsOpen: !s.automationsOpen, settingsOpen: false })),
+  toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
 
   showConfirmDialog: (dialog) => set({ confirmDialog: dialog }),
 
@@ -645,13 +821,47 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleCommandPalette: () => set((s) => ({ commandPaletteVisible: !s.commandPaletteVisible })),
   openCommandPalette: () => set({ commandPaletteVisible: true }),
   closeCommandPalette: () => set({ commandPaletteVisible: false }),
-  setPreviewUrl: (workspaceId, url) =>
+  setCodexLoggedIn: (loggedIn) => set({ codexLoggedIn: loggedIn }),
+
+  setChatThread: (thread) => set({ chatThread: thread }),
+
+  addChatMessage: (message) =>
+    set((s) => {
+      if (!s.chatThread) return s
+      return {
+        chatThread: {
+          ...s.chatThread,
+          messages: [...s.chatThread.messages, message],
+        },
+      }
+    }),
+
+  setChatLoading: (loading) =>
+    set((s) => {
+      if (!s.chatThread) return s
+      return {
+        chatThread: { ...s.chatThread, loading },
+      }
+    }),
+
+  sendChatMessage: (threadId, content) => {
+    const userMsg = {
+      id: crypto.randomUUID(),
+      role: 'user' as const,
+      content,
+      type: 'text' as const,
+      timestamp: Date.now(),
+    }
     set((s) => ({
-      previewUrlByWorkspace: {
-        ...s.previewUrlByWorkspace,
-        [workspaceId]: url,
+      chatMessages: {
+        ...s.chatMessages,
+        [threadId]: [...(s.chatMessages[threadId] ?? []), userMsg],
       },
-    })),
+    }))
+
+    // Send to main process via IPC
+    window.api.chat.send(threadId, content)
+  },
 
   markWorkspaceUnread: (workspaceId) =>
     set((s) => {
@@ -709,17 +919,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { ghAvailability: newAvail, ghErrorMap: newErrors }
     }),
 
-  addAutomation: (automation) =>
-    set((s) => ({ automations: [...s.automations, automation] })),
-
-  updateAutomation: (id, partial) =>
-    set((s) => ({
-      automations: s.automations.map((a) => (a.id === id ? { ...a, ...partial } : a)),
-    })),
-
-  removeAutomation: (id) =>
-    set((s) => ({ automations: s.automations.filter((a) => a.id !== id) })),
-
   openDiffTab: (workspaceId) => {
     const s = get()
     const existing = s.tabs.find(
@@ -739,6 +938,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   hydrateState: (data) => {
     const projects = (data.projects ?? []).map((project) => ({
       ...project,
+      ownership: parseProjectOwnership(project.ownership),
       prLinkProvider: project.prLinkProvider ?? DEFAULT_PR_LINK_PROVIDER,
     }))
     const workspaces = (data.workspaces ?? []).map((workspace) => ({
@@ -748,6 +948,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
     const saved = data.activeWorkspaceId
     const settings = data.settings ? { ...DEFAULT_SETTINGS, ...data.settings } : { ...DEFAULT_SETTINGS }
+    const lastSelectedBranchByProject = data.lastSelectedBranchByProject ?? {}
+    const persistedDialog = data.newThreadDialog ?? {}
+    const persistedMode = persistedDialog.mode === 'new' ? 'new' : 'existing'
     const activeWorkspaceId = settings.restoreWorkspace
       ? ((saved && workspaces.some((w) => w.id === saved) ? saved : workspaces[0]?.id) ?? null)
       : null
@@ -758,12 +961,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       projects,
       workspaces,
       tabs,
-      automations: data.automations ?? [],
       activeWorkspaceId,
       activeTabId,
       lastActiveTabByWorkspace: data.lastActiveTabByWorkspace ?? {},
+      lastSelectedBranchByProject,
+      newThreadDialog: {
+        open: false,
+        projectId: persistedDialog.projectId ?? null,
+        mode: persistedMode,
+        branch: typeof persistedDialog.branch === 'string' ? persistedDialog.branch : '',
+        baseBranch: typeof persistedDialog.baseBranch === 'string' ? persistedDialog.baseBranch : DEFAULT_FALLBACK_BRANCH,
+      },
       settings,
-      previewUrlByWorkspace: data.previewUrlByWorkspace ?? {},
     })
   },
 
@@ -786,12 +995,15 @@ function getPersistedSlice(state: AppState): PersistedState {
     projects: state.projects,
     workspaces: state.workspaces,
     tabs: state.tabs,
-    automations: state.automations,
     activeWorkspaceId: state.activeWorkspaceId,
     activeTabId: state.activeTabId,
     lastActiveTabByWorkspace: state.lastActiveTabByWorkspace,
+    lastSelectedBranchByProject: state.lastSelectedBranchByProject,
+    newThreadDialog: {
+      ...state.newThreadDialog,
+      open: false,
+    },
     settings: state.settings,
-    previewUrlByWorkspace: state.previewUrlByWorkspace,
   }
 }
 
@@ -811,10 +1023,9 @@ useAppStore.subscribe((state, prevState) => {
     state.workspaces !== prevState.workspaces ||
     state.tabs !== prevState.tabs ||
     state.activeTabId !== prevState.activeTabId ||
-    state.automations !== prevState.automations ||
     state.activeWorkspaceId !== prevState.activeWorkspaceId ||
-    state.settings !== prevState.settings ||
-    state.previewUrlByWorkspace !== prevState.previewUrlByWorkspace
+    state.lastSelectedBranchByProject !== prevState.lastSelectedBranchByProject ||
+    state.settings !== prevState.settings
   ) {
     debouncedSave(state)
   }
@@ -838,109 +1049,58 @@ export async function hydrateFromDisk(): Promise<void> {
     console.error('Failed to load persisted state:', err)
   }
 
-  // Reconcile persisted terminal tabs against live PTY processes
-  try {
-    const livePtyIds = new Set(await window.api.pty.list())
+  // Drop any stale tabs whose workspace no longer exists
+  {
     const store = useAppStore.getState()
-    const tabs = store.tabs
-
-    if (tabs.length > 0 && livePtyIds.size > 0) {
-      // Reattach surviving terminal tabs to the new webContents
-      const reattachPromises: Promise<boolean>[] = []
-      for (const tab of tabs) {
-        if (tab.type === 'terminal' && livePtyIds.has(tab.ptyId)) {
-          reattachPromises.push(window.api.pty.reattach(tab.ptyId))
-        }
-      }
-      await Promise.all(reattachPromises)
-    }
-
-    // Respawn PTYs for terminal tabs whose process is no longer alive
-    const deadTabs = tabs.filter(
-      (t): t is Extract<Tab, { type: 'terminal' }> =>
-        t.type === 'terminal' && !livePtyIds.has(t.ptyId)
-    )
-    if (deadTabs.length > 0) {
-      const { shell, args } = shellOverrides(store.settings)
-      const updatedTabs = [...tabs]
-      for (const dead of deadTabs) {
-        const ws = store.workspaces.find((w) => w.id === dead.workspaceId)
-        if (!ws) continue
-        try {
-          const newPtyId = await window.api.pty.create(ws.worktreePath, shell, args, {
-            AGENT_ORCH_WS_ID: ws.id,
-            AGENT_ORCH_PERMISSION_MODE: ws.agentPermissionMode,
-          })
-          const idx = updatedTabs.findIndex((t) => t.id === dead.id)
-          if (idx !== -1) updatedTabs[idx] = { ...dead, ptyId: newPtyId }
-        } catch {
-          // If respawn fails, drop the tab
-          const idx = updatedTabs.findIndex((t) => t.id === dead.id)
-          if (idx !== -1) updatedTabs.splice(idx, 1)
-        }
-      }
-      // Drop any terminal tabs whose workspace no longer exists
-      const finalTabs = updatedTabs.filter(
-        (t) => t.type !== 'terminal' || store.workspaces.some((w) => w.id === t.workspaceId)
-      )
-      const activeTabId = finalTabs.find((t) => t.id === store.activeTabId)
+    const wsIds = new Set(store.workspaces.map((w) => w.id))
+    const validTabs = store.tabs.filter((t) => wsIds.has(t.workspaceId))
+    if (validTabs.length !== store.tabs.length) {
+      const activeTabId = validTabs.find((t) => t.id === store.activeTabId)
         ? store.activeTabId
-        : (finalTabs.find((t) => t.workspaceId === store.activeWorkspaceId)?.id ?? null)
-      useAppStore.setState({ tabs: finalTabs, activeTabId })
+        : (validTabs.find((t) => t.workspaceId === store.activeWorkspaceId)?.id ?? null)
+      useAppStore.setState({ tabs: validTabs, activeTabId })
     }
-  } catch (err) {
-    console.error('Failed to reconcile PTY tabs:', err)
   }
 
-  // Schedule all enabled automations on startup
-  const state = useAppStore.getState()
-  for (const automation of state.automations) {
-    if (!automation.enabled) continue
-    const project = state.projects.find((p) => p.id === automation.projectId)
-    if (!project) continue
-    window.api.automations.create({
-      ...automation,
-      repoPath: project.repoPath,
-    })
+  // Check Codex auth status
+  try {
+    const authStatus = await window.api.chat.getAuthStatus()
+    useAppStore.setState({ codexLoggedIn: authStatus.loggedIn })
+  } catch {
+    // ignore — auth check is best-effort
   }
 
-  // Listen for automation run-started events from main process
-  window.api.automations.onRunStarted((data) => {
+  // Listen for chat events from Codex service in main process
+  window.api.chat.onEvent((event) => {
     const store = useAppStore.getState()
-    const { automationId, automationName, projectId, ptyId, worktreePath, branch } = data
-    const project = store.projects.find((p) => p.id === projectId)
-    if (!project) return
+    const { threadId, type, data } = event
 
-    // Create workspace for the run
-    const now = new Date()
-    const timestamp = now.toLocaleDateString('en-US', {
-      month: 'short', day: 'numeric',
-    }) + ' ' + now.toLocaleTimeString('en-US', {
-      hour: 'numeric', minute: '2-digit',
-    })
-    const wsId = crypto.randomUUID()
-    store.addWorkspace({
-      id: wsId,
-      type: DEFAULT_WORKSPACE_TYPE,
-      name: `${automationName} · ${timestamp}`,
-      branch: branch || '',
-      worktreePath: worktreePath || project.repoPath,
-      projectId,
-      automationId,
-      agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-    })
+    if (type === 'message.completed' && data && typeof data === 'object' && 'content' in data) {
+      const msg = data as { id: string; role: 'assistant'; content: string }
+      store.chatMessages[threadId] // check exists
+      useAppStore.setState((s) => ({
+        chatMessages: {
+          ...s.chatMessages,
+          [threadId]: [
+            ...(s.chatMessages[threadId] ?? []),
+            {
+              id: msg.id ?? crypto.randomUUID(),
+              role: 'assistant',
+              content: msg.content,
+              timestamp: Date.now(),
+            },
+          ],
+        },
+      }))
+    }
 
-    // Create terminal tab for the run
-    store.addTab({
-      id: crypto.randomUUID(),
-      workspaceId: wsId,
-      type: 'terminal',
-      title: automationName,
-      ptyId,
-    })
-
-    // Update automation lastRunAt
-    store.updateAutomation(automationId, { lastRunAt: Date.now() })
+    if (type === 'error' && data && typeof data === 'object' && 'message' in data) {
+      store.addToast({
+        id: crypto.randomUUID(),
+        message: `Chat error: ${(data as { message: string }).message}`,
+        type: 'error',
+      })
+    }
   })
 }
 

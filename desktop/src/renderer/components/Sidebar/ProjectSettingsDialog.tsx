@@ -8,12 +8,16 @@ import {
   DialogActions,
   Button,
 } from '@fluentui/react-components'
-import type { Project, PrLinkProvider, StartupCommand } from '../../store/types'
+import { parseProjectOwnership, type Project, type ProjectOwnership, type PrLinkProvider, type StartupCommand } from '../../store/types'
 import styles from './ProjectSettingsDialog.module.css'
 
 interface Props {
   project: Project
-  onSave: (settings: { startupCommands: StartupCommand[]; prLinkProvider: PrLinkProvider }) => void
+  onSave: (settings: {
+    startupCommands: StartupCommand[]
+    prLinkProvider: PrLinkProvider
+    ownership: ProjectOwnership
+  }) => void
   onCancel: () => void
 }
 
@@ -23,6 +27,9 @@ export function ProjectSettingsDialog({ project, onSave, onCancel }: Props) {
   )
   const [prLinkProvider, setPrLinkProvider] = useState<PrLinkProvider>(
     project.prLinkProvider ?? 'github'
+  )
+  const [ownership, setOwnership] = useState<ProjectOwnership>(
+    parseProjectOwnership(project.ownership)
   )
 
   const handleAdd = useCallback(() => {
@@ -45,8 +52,9 @@ export function ProjectSettingsDialog({ project, onSave, onCancel }: Props) {
     onSave({
       startupCommands: filtered.length > 0 ? filtered : [],
       prLinkProvider,
+      ownership,
     })
-  }, [commands, onSave, prLinkProvider])
+  }, [commands, onSave, ownership, prLinkProvider])
 
   return (
     <Dialog open onOpenChange={(_, data) => { if (!data.open) onCancel() }}>
@@ -56,7 +64,7 @@ export function ProjectSettingsDialog({ project, onSave, onCancel }: Props) {
           <DialogContent className={styles.content}>
             <label className={styles.label}>Startup Commands</label>
             <div className={styles.hint}>
-              Run in separate terminals when creating a workspace.
+              Run when creating a workspace.
             </div>
 
             <div className={styles.commandList}>
@@ -104,6 +112,19 @@ export function ProjectSettingsDialog({ project, onSave, onCancel }: Props) {
               <option value="github">GitHub</option>
               <option value="graphite">Graphite</option>
               <option value="devinreview">Devin Review</option>
+            </select>
+
+            <label className={styles.label}>Ownership</label>
+            <div className={styles.hint}>
+              Controls which GitHub account is preferred for this project.
+            </div>
+            <select
+              className={styles.selectInput}
+              value={ownership}
+              onChange={(e) => setOwnership(parseProjectOwnership(e.target.value))}
+            >
+              <option value="personal">Personal</option>
+              <option value="work">Laburo</option>
             </select>
           </DialogContent>
           <DialogActions>
