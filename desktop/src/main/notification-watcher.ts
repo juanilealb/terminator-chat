@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs'
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, watch, type FSWatcher } from 'fs'
 import { join } from 'path'
 import { BrowserWindow } from 'electron'
 import { IPC, type AgentActivitySnapshot, type AgentNotifyReason } from '../shared/ipc-channels'
@@ -6,7 +6,9 @@ import { debugLog } from '@shared/platform'
 import { getMarkerDirs, notifyWorkspace } from './agent-notifier'
 
 const { notifyDir: NOTIFY_DIR, activityDir: ACTIVITY_DIR } = getMarkerDirs()
-const POLL_INTERVAL = 500
+const RESYNC_INTERVAL_MS = 5_000
+const NOTIFY_DEBOUNCE_MS = 60
+const ACTIVITY_DEBOUNCE_MS = 90
 const CLAUDE_MARKER_SUFFIX = '.claude'
 const CODEX_MARKER_SEGMENT = '.codex.'
 const CODEX_WAITING_MARKER_SEGMENT = '.codex-wait.'
@@ -17,30 +19,83 @@ interface MarkerInfo {
 }
 
 export class NotificationWatcher {
-  private timer: ReturnType<typeof setInterval> | null = null
+  private resyncTimer: ReturnType<typeof setInterval> | null = null
+  private notifyWatcher: FSWatcher | null = null
+  private activityWatcher: FSWatcher | null = null
+  private notifyDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  private activityDebounceTimer: ReturnType<typeof setTimeout> | null = null
   private prevSnapshot: AgentActivitySnapshot = this.emptySnapshot()
 
   start(): void {
     mkdirSync(NOTIFY_DIR, { recursive: true })
     mkdirSync(ACTIVITY_DIR, { recursive: true })
     this.cleanupStartupActivityMarkers()
-    this.pollOnce()
-    this.timer = setInterval(() => this.pollOnce(), POLL_INTERVAL)
+    this.processNotifications()
+    this.processActivity()
+    this.watchDirs()
+    this.resyncTimer = setInterval(() => {
+      this.processNotifications()
+      this.processActivity()
+    }, RESYNC_INTERVAL_MS)
   }
 
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = null
+    if (this.resyncTimer) {
+      clearInterval(this.resyncTimer)
+      this.resyncTimer = null
+    }
+    if (this.notifyDebounceTimer) {
+      clearTimeout(this.notifyDebounceTimer)
+      this.notifyDebounceTimer = null
+    }
+    if (this.activityDebounceTimer) {
+      clearTimeout(this.activityDebounceTimer)
+      this.activityDebounceTimer = null
+    }
+    if (this.notifyWatcher) {
+      this.notifyWatcher.close()
+      this.notifyWatcher = null
+    }
+    if (this.activityWatcher) {
+      this.activityWatcher.close()
+      this.activityWatcher = null
     }
   }
 
-  private pollOnce(): void {
-    this.pollNotifications()
-    this.pollActivity()
+  private watchDirs(): void {
+    this.notifyWatcher = this.createWatcher(NOTIFY_DIR, () => this.scheduleNotificationScan())
+    this.activityWatcher = this.createWatcher(ACTIVITY_DIR, () => this.scheduleActivityScan())
   }
 
-  private pollNotifications(): void {
+  private createWatcher(dir: string, onEvent: () => void): FSWatcher | null {
+    try {
+      return watch(dir, () => onEvent())
+    } catch (error) {
+      debugLog('Failed to watch marker directory; using periodic resync only', {
+        dir,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
+  }
+
+  private scheduleNotificationScan(): void {
+    if (this.notifyDebounceTimer) return
+    this.notifyDebounceTimer = setTimeout(() => {
+      this.notifyDebounceTimer = null
+      this.processNotifications()
+    }, NOTIFY_DEBOUNCE_MS)
+  }
+
+  private scheduleActivityScan(): void {
+    if (this.activityDebounceTimer) return
+    this.activityDebounceTimer = setTimeout(() => {
+      this.activityDebounceTimer = null
+      this.processActivity()
+    }, ACTIVITY_DEBOUNCE_MS)
+  }
+
+  private processNotifications(): void {
     try {
       const files = readdirSync(NOTIFY_DIR)
       for (const f of files) {
@@ -51,7 +106,7 @@ export class NotificationWatcher {
     }
   }
 
-  private pollActivity(): void {
+  private processActivity(): void {
     try {
       const files = readdirSync(ACTIVITY_DIR)
       const snapshot = this.buildSnapshot(files)
