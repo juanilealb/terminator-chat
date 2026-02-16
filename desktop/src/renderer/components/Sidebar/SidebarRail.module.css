@@ -116,6 +116,12 @@
   box-shadow: 0 0 8px var(--colorPaletteDarkOrangeBackground2);
 }
 
+.workspaceButton.completed {
+  border-color: var(--colorPaletteGreenForeground1);
+  background: var(--colorPaletteGreenForeground1);
+  box-shadow: 0 0 8px var(--colorPaletteGreenBackground2);
+}
+
 .workspaceButton.running {
   border-color: var(--colorPaletteTealForeground2);
   background: transparent;

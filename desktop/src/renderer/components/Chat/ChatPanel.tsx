@@ -570,6 +570,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const setActiveWorkspace = useAppStore((s) => s.setActiveWorkspace)
   const setLastSelectedBranch = useAppStore((s) => s.setLastSelectedBranch)
   const createChatForActiveWorkspace = useAppStore((s) => s.createChatForActiveWorkspace)
+  const setWorkspaceAgentStatus = useAppStore((s) => s.setWorkspaceAgentStatus)
   const addWorkspace = useAppStore((s) => s.addWorkspace)
   const addToast = useAppStore((s) => s.addToast)
   const projects = useAppStore((s) => s.projects)
@@ -603,47 +604,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   // Guard against SDK item-id reuse across turns. We scope all item ids by turn.
   const eventTurnSequenceRef = useRef(0)
   const activeTurnHasItemsRef = useRef(false)
-  const waitingNotifiedThisTurnRef = useRef(false)
-
-  const setWorkspaceAgentStatus = useCallback((status: 'running' | 'waiting' | 'idle') => {
-    if (!workspaceId) return
-    useAppStore.setState((state) => {
-      const activeClaudeWorkspaceIds = new Set(state.activeClaudeWorkspaceIds)
-      const waitingClaudeWorkspaceIds = new Set(state.waitingClaudeWorkspaceIds)
-
-      if (status === 'running') {
-        activeClaudeWorkspaceIds.add(workspaceId)
-        waitingClaudeWorkspaceIds.delete(workspaceId)
-      } else if (status === 'waiting') {
-        activeClaudeWorkspaceIds.delete(workspaceId)
-        waitingClaudeWorkspaceIds.add(workspaceId)
-      } else {
-        activeClaudeWorkspaceIds.delete(workspaceId)
-        waitingClaudeWorkspaceIds.delete(workspaceId)
-      }
-
-      return {
-        activeClaudeWorkspaceIds,
-        waitingClaudeWorkspaceIds,
-        runningAgentCount: activeClaudeWorkspaceIds.size,
-        waitingAgentCount: waitingClaudeWorkspaceIds.size,
-      }
-    })
-  }, [workspaceId])
-
-  const notifyWorkspaceEvent = useCallback((reason: 'completed' | 'waiting_input') => {
-    if (!workspaceId) return
-    const state = useAppStore.getState()
-    const isBackground = workspaceId !== state.activeWorkspaceId
-    if (!isBackground) return
-
-    state.markWorkspaceUnread(workspaceId)
-    const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
-    const message = reason === 'waiting_input'
-      ? `Agent waiting for your input in ${workspaceName}`
-      : `Agent completed in ${workspaceName}`
-    state.addToast({ id: crypto.randomUUID(), message, type: 'info' })
-  }, [workspaceId])
 
   const renderItems = useMemo<ChatRenderItem[]>(() => {
     if (messages.length === 0) return []
@@ -801,9 +761,22 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [])
 
   const resetRuntimeThreadState = useCallback(() => {
+    const previousThreadId = realThreadIdRef.current
+    if (previousThreadId) {
+      void window.api.chat.destroyThread(previousThreadId).catch(() => {})
+    }
     realThreadIdRef.current = null
     eventTurnSequenceRef.current = 0
     activeTurnHasItemsRef.current = false
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      const previousThreadId = realThreadIdRef.current
+      if (previousThreadId) {
+        void window.api.chat.destroyThread(previousThreadId).catch(() => {})
+      }
+    }
   }, [])
 
   const toScopedItemId = useCallback((rawId: unknown) => {
@@ -844,8 +817,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
-        waitingNotifiedThisTurnRef.current = false
-        setWorkspaceAgentStatus('running')
+        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'running')
+        return
+      }
+
+      if (type === 'turn.waiting_input') {
+        setLoading(false)
+        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
         return
       }
 
@@ -859,11 +837,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           const text = (typedData.text as string) ?? ''
           if (looksInteractiveQuestionText(text)) {
             setLoading(false)
-            setWorkspaceAgentStatus('waiting')
-            if (!waitingNotifiedThisTurnRef.current) {
-              waitingNotifiedThisTurnRef.current = true
-              notifyWorkspaceEvent('waiting_input')
-            }
+            if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
           }
           msg = {
             id: scopedId,
@@ -963,11 +937,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           const interactiveQuestion = getInteractiveQuestion(typedData)
           if (interactiveQuestion) {
             setLoading(false)
-            setWorkspaceAgentStatus('waiting')
-            if (!waitingNotifiedThisTurnRef.current) {
-              waitingNotifiedThisTurnRef.current = true
-              notifyWorkspaceEvent('waiting_input')
-            }
+            if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
             msg = {
               id: scopedId,
               role: 'assistant',
@@ -1007,14 +977,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else if (type === 'turn.completed') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        waitingNotifiedThisTurnRef.current = false
-        setWorkspaceAgentStatus('idle')
-        notifyWorkspaceEvent('completed')
+        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'completed')
+      } else if (type === 'turn.cancelled') {
+        setLoading(false)
+        activeTurnHasItemsRef.current = false
+        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
       } else if (type === 'turn.failed' || type === 'error') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        waitingNotifiedThisTurnRef.current = false
-        setWorkspaceAgentStatus('idle')
+        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
         const message = (typedData.message as string) ?? 'An error occurred'
         useAppStore.setState((s) => ({
           chatMessages: {
@@ -1035,11 +1006,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         const interactiveQuestion = getInteractiveQuestion(typedData)
         if (interactiveQuestion) {
           setLoading(false)
-          setWorkspaceAgentStatus('waiting')
-          if (!waitingNotifiedThisTurnRef.current) {
-            waitingNotifiedThisTurnRef.current = true
-            notifyWorkspaceEvent('waiting_input')
-          }
+          if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
           useAppStore.setState((s) => ({
             chatMessages: {
               ...s.chatMessages,
@@ -1056,7 +1023,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       }
     })
     return unsub
-  }, [threadId, toScopedItemId, setWorkspaceAgentStatus, notifyWorkspaceEvent])
+  }, [threadId, workspaceId, toScopedItemId, setWorkspaceAgentStatus])
 
   const handleLogin = useCallback(async () => {
     setLoginLoading(true)
@@ -1099,7 +1066,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     // Create real Codex thread if needed (pass model & effort)
     if (!realThreadIdRef.current) {
       try {
-        const realId = await window.api.chat.createThread(worktreePath, model, effort, threadOptions)
+        const realId = await window.api.chat.createThread(worktreePath, model, effort, threadOptions, workspaceId)
         realThreadIdRef.current = realId
         eventTurnSequenceRef.current = 0
         activeTurnHasItemsRef.current = false
@@ -1139,7 +1106,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     setInput('')
     setAttachedImages([])
     setLoading(true)
-    setWorkspaceAgentStatus('running')
+    if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'running')
 
     // Auto-resize textarea
     if (textareaRef.current) {
@@ -1166,7 +1133,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       await window.api.chat.send(realThreadIdRef.current!, sendInput)
     } catch (err) {
       setLoading(false)
-      setWorkspaceAgentStatus('idle')
+      if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
       useAppStore.setState((s) => ({
         chatMessages: {
           ...s.chatMessages,
@@ -1181,15 +1148,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         },
       }))
     }
-  }, [input, worktreePath, threadId, model, effort, attachedImages, sessionMode, agentPermissionMode, setWorkspaceAgentStatus])
+  }, [input, worktreePath, threadId, workspaceId, model, effort, attachedImages, sessionMode, agentPermissionMode, setWorkspaceAgentStatus])
 
   const handleCancel = useCallback(() => {
     if (realThreadIdRef.current) {
       window.api.chat.cancel(realThreadIdRef.current)
     }
     setLoading(false)
-    setWorkspaceAgentStatus('idle')
-  }, [setWorkspaceAgentStatus])
+    if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
+  }, [workspaceId, setWorkspaceAgentStatus])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Tab' && e.shiftKey) {

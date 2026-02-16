@@ -200,8 +200,14 @@ export function App() {
   useEffect(() => {
     const unsub = window.api.claude.onNotifyWorkspace(({ workspaceId, reason }) => {
       const state = useAppStore.getState()
-      if (workspaceId !== state.activeWorkspaceId) {
-        state.markWorkspaceUnread(workspaceId)
+      const isBackground = workspaceId !== state.activeWorkspaceId
+      if (!isBackground) return
+
+      state.markWorkspaceUnread(workspaceId)
+      if (reason === 'completed') {
+        state.setWorkspaceAgentStatus(workspaceId, 'completed')
+      } else if (reason === 'waiting_input') {
+        state.setWorkspaceAgentStatus(workspaceId, 'waiting')
       }
 
       const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
@@ -269,6 +275,10 @@ export function App() {
   useEffect(() => {
     window.api.app.setUnreadCount(unreadWorkspaceCount)
   }, [unreadWorkspaceCount])
+
+  useEffect(() => {
+    window.api.app.setActiveWorkspace(activeWorkspaceId)
+  }, [activeWorkspaceId])
 
   useEffect(() => {
     const unsub = window.api.app.onThemeChanged((payload) => {

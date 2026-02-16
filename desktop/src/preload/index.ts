@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipc-channels'
 import type {
   AgentActivitySnapshot,
   AgentNotifyEvent,
+  ChatEventPayload,
   ThemeChangedPayload,
   ThemePreference,
 } from '../shared/ipc-channels'
@@ -130,6 +131,8 @@ const api = {
       ipcRenderer.invoke(IPC.APP_GET_DATA_PATH),
     setUnreadCount: (count: number) =>
       ipcRenderer.send(IPC.APP_SET_UNREAD_COUNT, count),
+    setActiveWorkspace: (workspaceId: string | null) =>
+      ipcRenderer.send(IPC.APP_SET_ACTIVE_WORKSPACE, workspaceId),
     setThemePreference: (themePreference: ThemePreference) =>
       ipcRenderer.send(IPC.APP_SET_THEME_SOURCE, themePreference),
     minimizeWindow: () =>
@@ -274,16 +277,19 @@ const api = {
         sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
         approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
       },
+      workspaceId?: string,
     ) =>
-      ipcRenderer.invoke(IPC.CHAT_CREATE_THREAD, workingDir, model, effort, options) as Promise<string>,
+      ipcRenderer.invoke(IPC.CHAT_CREATE_THREAD, workingDir, model, effort, options, workspaceId) as Promise<string>,
     send: (threadId: string, input: string | Array<{ type: string; text?: string; path?: string }>) =>
-      ipcRenderer.invoke(IPC.CHAT_SEND, threadId, input),
+      ipcRenderer.invoke(IPC.CHAT_SEND, threadId, input) as Promise<{ accepted: true; turnId: string }>,
     cancel: (threadId: string) =>
       ipcRenderer.invoke(IPC.CHAT_CANCEL, threadId),
+    destroyThread: (threadId: string) =>
+      ipcRenderer.invoke(IPC.CHAT_DESTROY_THREAD, threadId),
     resume: (threadId: string) =>
       ipcRenderer.invoke(IPC.CHAT_RESUME, threadId) as Promise<boolean>,
-    onEvent: (callback: (event: { threadId: string; type: string; data: unknown }) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, data: { threadId: string; type: string; data: unknown }) => callback(data)
+    onEvent: (callback: (event: ChatEventPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: ChatEventPayload) => callback(data)
       ipcRenderer.on(IPC.CHAT_EVENT, listener)
       return () => {
         ipcRenderer.removeListener(IPC.CHAT_EVENT, listener)

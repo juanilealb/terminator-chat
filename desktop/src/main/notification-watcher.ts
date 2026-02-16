@@ -1,12 +1,11 @@
 import { mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
-import { app, BrowserWindow, nativeImage, Notification } from 'electron'
+import { BrowserWindow } from 'electron'
 import { IPC, type AgentActivitySnapshot, type AgentNotifyReason } from '../shared/ipc-channels'
-import { debugLog, getTempDir } from '@shared/platform'
-import { sendActivateWorkspace } from './ipc'
+import { debugLog } from '@shared/platform'
+import { getMarkerDirs, notifyWorkspace } from './agent-notifier'
 
-const NOTIFY_DIR = join(getTempDir(), 'terminator-chat-notify')
-const ACTIVITY_DIR = join(getTempDir(), 'terminator-chat-activity')
+const { notifyDir: NOTIFY_DIR, activityDir: ACTIVITY_DIR } = getMarkerDirs()
 const POLL_INTERVAL = 500
 const CLAUDE_MARKER_SUFFIX = '.claude'
 const CODEX_MARKER_SEGMENT = '.codex.'
@@ -17,25 +16,9 @@ interface MarkerInfo {
   kind: 'claude' | 'codex_running' | 'codex_waiting'
 }
 
-function getNotificationIcon() {
-  const candidates = [
-    join(app.getAppPath(), 'build', 'icon.png'),
-    join(process.resourcesPath, 'build', 'icon.png'),
-    join(process.resourcesPath, 'icon.png'),
-  ]
-
-  for (const iconPath of candidates) {
-    const icon = nativeImage.createFromPath(iconPath)
-    if (!icon.isEmpty()) return icon
-  }
-
-  return nativeImage.createEmpty()
-}
-
 export class NotificationWatcher {
   private timer: ReturnType<typeof setInterval> | null = null
   private prevSnapshot: AgentActivitySnapshot = this.emptySnapshot()
-  private lastNotifiedAtByKey = new Map<string, number>()
 
   start(): void {
     mkdirSync(NOTIFY_DIR, { recursive: true })
@@ -248,45 +231,7 @@ export class NotificationWatcher {
   }
 
   private notifyRenderer(workspaceId: string, reason: AgentNotifyReason): void {
-    const dedupeKey = `${workspaceId}:${reason}`
-    const now = Date.now()
-    const prevNotifyAt = this.lastNotifiedAtByKey.get(dedupeKey) ?? 0
-    if ((now - prevNotifyAt) < 10_000) return
-    this.lastNotifiedAtByKey.set(dedupeKey, now)
-
-    this.showNotification(workspaceId, reason)
-
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send(IPC.CLAUDE_NOTIFY_WORKSPACE, { workspaceId, reason })
-      }
-    }
-  }
-
-  private showNotification(workspaceId: string, reason: AgentNotifyReason): void {
-    if (!Notification.isSupported()) return
-
-    const body = reason === 'waiting_input'
-      ? `Agent waiting for your input in workspace ${workspaceId}`
-      : `Agent completed in workspace ${workspaceId}`
-
-    const notification = new Notification({
-      title: 'Terminator Chat',
-      body,
-      icon: getNotificationIcon(),
-    })
-
-    notification.on('click', () => {
-      const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed())
-      if (!win) return
-
-      if (win.isMinimized()) win.restore()
-      if (!win.isVisible()) win.show()
-      win.focus()
-      sendActivateWorkspace(workspaceId)
-    })
-
-    notification.show()
+    notifyWorkspace(workspaceId, reason, { source: 'hook' })
   }
 
   private sendActivity(snapshot: AgentActivitySnapshot): void {

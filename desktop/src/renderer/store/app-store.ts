@@ -89,6 +89,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   unreadWorkspaceIds: new Set<string>(),
   activeClaudeWorkspaceIds: new Set<string>(),
   waitingClaudeWorkspaceIds: new Set<string>(),
+  completedClaudeWorkspaceIds: new Set<string>(),
   runningAgentCount: 0,
   waitingAgentCount: 0,
   prStatusMap: new Map(),
@@ -123,6 +124,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const waitingClaudeWorkspaceIds = new Set(
         Array.from(s.waitingClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
       )
+      const completedClaudeWorkspaceIds = new Set(
+        Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
+      )
       for (const wsId of removedWsIds) delete tabMap[wsId]
       return {
         projects: s.projects.filter((p) => p.id !== id),
@@ -130,6 +134,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         unreadWorkspaceIds,
         activeClaudeWorkspaceIds,
         waitingClaudeWorkspaceIds,
+        completedClaudeWorkspaceIds,
         runningAgentCount: activeClaudeWorkspaceIds.size,
         waitingAgentCount: waitingClaudeWorkspaceIds.size,
         lastActiveTabByWorkspace: tabMap,
@@ -149,9 +154,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newUnread = new Set(s.unreadWorkspaceIds)
       const newActiveClaude = new Set(s.activeClaudeWorkspaceIds)
       const newWaitingClaude = new Set(s.waitingClaudeWorkspaceIds)
+      const newCompletedClaude = new Set(s.completedClaudeWorkspaceIds)
       newUnread.delete(id)
       newActiveClaude.delete(id)
       newWaitingClaude.delete(id)
+      newCompletedClaude.delete(id)
       const tabMap = { ...s.lastActiveTabByWorkspace }
       delete tabMap[id]
       return {
@@ -160,6 +167,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         unreadWorkspaceIds: newUnread,
         activeClaudeWorkspaceIds: newActiveClaude,
         waitingClaudeWorkspaceIds: newWaitingClaude,
+        completedClaudeWorkspaceIds: newCompletedClaude,
         runningAgentCount: newActiveClaude.size,
         waitingAgentCount: newWaitingClaude.size,
         lastActiveTabByWorkspace: tabMap,
@@ -204,7 +212,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const wsTabs = s.tabs.filter((t) => t.workspaceId === id)
       const newUnread = new Set(s.unreadWorkspaceIds)
+      const newCompleted = new Set(s.completedClaudeWorkspaceIds)
       if (id) newUnread.delete(id)
+      if (id) newCompleted.delete(id)
 
       // Restore remembered tab, falling back to first tab
       const remembered = id ? tabMap[id] : null
@@ -217,6 +227,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeTabId,
         lastActiveTabByWorkspace: tabMap,
         unreadWorkspaceIds: newUnread,
+        completedClaudeWorkspaceIds: newCompleted,
       }
     }),
 
@@ -879,23 +890,70 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { unreadWorkspaceIds: newUnread }
     }),
 
+  setWorkspaceAgentStatus: (workspaceId, status) =>
+    set((s) => {
+      if (!workspaceId) return s
+
+      const activeClaudeWorkspaceIds = new Set(s.activeClaudeWorkspaceIds)
+      const waitingClaudeWorkspaceIds = new Set(s.waitingClaudeWorkspaceIds)
+      const completedClaudeWorkspaceIds = new Set(s.completedClaudeWorkspaceIds)
+
+      if (status === 'running') {
+        activeClaudeWorkspaceIds.add(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      } else if (status === 'waiting') {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.add(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      } else if (status === 'completed') {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        if (workspaceId !== s.activeWorkspaceId) {
+          completedClaudeWorkspaceIds.add(workspaceId)
+        } else {
+          completedClaudeWorkspaceIds.delete(workspaceId)
+        }
+      } else {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      }
+
+      return {
+        activeClaudeWorkspaceIds,
+        waitingClaudeWorkspaceIds,
+        completedClaudeWorkspaceIds,
+        runningAgentCount: activeClaudeWorkspaceIds.size,
+        waitingAgentCount: waitingClaudeWorkspaceIds.size,
+      }
+    }),
+
   setActiveClaudeWorkspaces: (workspaceIds) =>
-    set(() => ({
+    set((s) => ({
       activeClaudeWorkspaceIds: new Set(workspaceIds),
       runningAgentCount: workspaceIds.length,
       waitingClaudeWorkspaceIds: new Set(),
       waitingAgentCount: 0,
+      completedClaudeWorkspaceIds: new Set(
+        Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !workspaceIds.includes(wsId)),
+      ),
     })),
 
   setClaudeActivitySnapshot: (snapshot) =>
-    set(() => {
+    set((s) => {
       const waitingAgentCount = Object.values(snapshot.waitingAgentsByWorkspace).reduce(
         (sum, count) => sum + count,
         0,
       )
+      const activeSet = new Set(snapshot.runningWorkspaceIds)
+      const waitingSet = new Set(snapshot.waitingWorkspaceIds)
       return {
-        activeClaudeWorkspaceIds: new Set(snapshot.runningWorkspaceIds),
-        waitingClaudeWorkspaceIds: new Set(snapshot.waitingWorkspaceIds),
+        activeClaudeWorkspaceIds: activeSet,
+        waitingClaudeWorkspaceIds: waitingSet,
+        completedClaudeWorkspaceIds: new Set(
+          Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !activeSet.has(wsId) && !waitingSet.has(wsId)),
+        ),
         runningAgentCount: snapshot.runningAgentCount,
         waitingAgentCount,
       }
