@@ -7,6 +7,7 @@
   overflow: hidden;
   padding: 0 calc(8px + var(--window-controls-width-tabbar)) 0 8px;
   column-gap: 8px;
+  -webkit-app-region: drag;
 }
 
 .titleArea {
@@ -158,4 +159,99 @@
   line-height: 1;
   font-weight: var(--weight-medium);
   margin-top: -1px;
+}
+
+/* Tab pills */
+
+.tabStripArea {
+  grid-column: 2;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+
+.tabStrip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabStrip::-webkit-scrollbar {
+  display: none;
+}
+
+.tabPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.tabPill:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.tabPillActive {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+  background: var(--bg-surface-active);
+}
+
+.tabPillLabel {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabPillUnsavedDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-yellow);
+  flex-shrink: 0;
+}
+
+.tabPillClose {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.tabPillClose:hover {
+  background: var(--accent-red);
+  color: var(--text-on-accent);
 }
