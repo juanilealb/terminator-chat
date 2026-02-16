@@ -198,7 +198,12 @@ const api = {
     onNotifyWorkspace: (callback: (event: AgentNotifyEvent) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: AgentNotifyEvent | string) => {
         if (typeof payload === 'string') {
-          callback({ workspaceId: payload, reason: 'completed' })
+          callback({
+            notifyId: crypto.randomUUID(),
+            ts: Date.now(),
+            workspaceId: payload,
+            reason: 'completed',
+          })
           return
         }
         callback(payload)

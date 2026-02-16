@@ -8,6 +8,8 @@ export interface ThemeChangedPayload {
 export type AgentNotifyReason = 'completed' | 'waiting_input'
 
 export interface AgentNotifyEvent {
+  notifyId: string
+  ts: number
   workspaceId: string
   reason: AgentNotifyReason
   turnId?: string

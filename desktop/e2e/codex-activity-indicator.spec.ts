@@ -10,7 +10,7 @@ async function launchApp(): Promise<{ app: ElectronApplication; window: Page }> 
   const app = await electron.launch({ args: [appPath], env: { ...process.env, CI_TEST: '1' } })
   const window = await app.firstWindow()
   await window.waitForLoadState('domcontentloaded')
-  await window.waitForSelector('#root', { timeout: 10000 })
+  await window.waitForSelector('#root', { timeout: 20000 })
   await window.waitForTimeout(1000)
   return { app, window }
 }

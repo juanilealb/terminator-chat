@@ -84,6 +84,8 @@ export function notifyWorkspace(
     if (!isWorkspaceInBackground(win, workspaceId)) continue
     anyBackgroundWindow = true
     win.webContents.send(IPC.CLAUDE_NOTIFY_WORKSPACE, {
+      notifyId: crypto.randomUUID(),
+      ts: Date.now(),
       workspaceId,
       reason,
       turnId: options?.turnId,
