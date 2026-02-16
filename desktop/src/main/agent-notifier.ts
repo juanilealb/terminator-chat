@@ -8,6 +8,19 @@ const lastNotifiedAtByKey = new Map<string, number>()
 const DEFAULT_DEDUPE_MS = 10_000
 const CROSS_SOURCE_DEDUPE_MS = 1_200
 const NO_TURN_DEDUPE_MS = 1_500
+const NOTIFY_DEDUPE_PRUNE_INTERVAL_MS = 60_000
+const NOTIFY_DEDUPE_STALE_MS = 120_000
+let lastPruneAt = 0
+
+function pruneDedupeMap(now: number): void {
+  if ((now - lastPruneAt) < NOTIFY_DEDUPE_PRUNE_INTERVAL_MS) return
+  lastPruneAt = now
+
+  const staleBefore = now - NOTIFY_DEDUPE_STALE_MS
+  for (const [key, ts] of lastNotifiedAtByKey) {
+    if (ts < staleBefore) lastNotifiedAtByKey.delete(key)
+  }
+}
 
 function getNotificationIcon() {
   const candidates = [
@@ -26,6 +39,7 @@ function getNotificationIcon() {
 
 function shouldSkipNotification(key: string, dedupeMs: number): boolean {
   const now = Date.now()
+  pruneDedupeMap(now)
   const last = lastNotifiedAtByKey.get(key) ?? 0
   if ((now - last) < dedupeMs) return true
   lastNotifiedAtByKey.set(key, now)
