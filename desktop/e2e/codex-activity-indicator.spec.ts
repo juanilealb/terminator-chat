@@ -1,387 +1,304 @@
 import { test, expect, _electron as electron, ElectronApplication, Page } from '@playwright/test'
 import { resolve, join } from 'path'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
-import { execSync } from 'child_process'
+import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 
 const appPath = resolve(__dirname, '../out/main/index.js')
-const FAKE_CODEX_BIN = join(tmpdir(), 'codex.exe')
-const TEST_TERMINAL = 'powershell.exe'
-const NOTIFY_DIR = join(tmpdir(), 'terminator-notify')
-const ACTIVITY_DIR = join(tmpdir(), 'terminator-activity')
-
-function psQuote(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`
-}
-
-function spawnFakeCodexCommand(fakeCodexPath: string): string {
-  return [
-    `$timeoutBin = (Get-Command timeout.exe).Source`,
-    `$target = ${psQuote(fakeCodexPath)}`,
-    'Copy-Item -Path $timeoutBin -Destination $target -Force',
-    '& $target /T 2 /NOBREAK',
-    '',
-  ].join('; ')
-}
-
-function notifyAndClearCodexCommand(workspaceId: string): string {
-  const activityPattern = join(ACTIVITY_DIR, `${workspaceId}.codex.*`)
-  const waitingPattern = join(ACTIVITY_DIR, `${workspaceId}.codex-wait.*`)
-  return [
-    `$notifyDir = ${psQuote(NOTIFY_DIR)}`,
-    'New-Item -ItemType Directory -Path $notifyDir -Force | Out-Null',
-    '$notifyFile = Join-Path $notifyDir ("test-" + [guid]::NewGuid().ToString())',
-    `Set-Content -Path $notifyFile -Value ${psQuote(workspaceId)} -NoNewline`,
-    `Remove-Item -Path ${psQuote(activityPattern)} -Force -ErrorAction SilentlyContinue`,
-    `Remove-Item -Path ${psQuote(waitingPattern)} -Force -ErrorAction SilentlyContinue`,
-    '',
-  ].join('; ') + '\n'
-}
-
-function clearCodexActivityCommand(workspaceId: string): string {
-  const activityPattern = join(ACTIVITY_DIR, `${workspaceId}.codex.*`)
-  const waitingPattern = join(ACTIVITY_DIR, `${workspaceId}.codex-wait.*`)
-  return [
-    `Remove-Item -Path ${psQuote(activityPattern)} -Force -ErrorAction SilentlyContinue`,
-    `Remove-Item -Path ${psQuote(waitingPattern)} -Force -ErrorAction SilentlyContinue`,
-    '',
-  ].join('\n')
-}
-
-function markCodexActivityCommand(workspaceId: string): string {
-  return [
-    `$activityDir = ${psQuote(ACTIVITY_DIR)}`,
-    'New-Item -ItemType Directory -Path $activityDir -Force | Out-Null',
-    `$workspaceId = ${psQuote(workspaceId)}`,
-    '$markerPath = Join-Path $activityDir ("$workspaceId.codex.$PID")',
-    'New-Item -ItemType File -Path $markerPath -Force | Out-Null',
-    '',
-  ].join('; ') + '\n'
-}
-
-function codexQuestionPromptCommand(): string {
-  return [
-    'Write-Output "Question 1/1 (1 unanswered)"',
-    'Write-Output "How should project-level provider interact with the existing global setting?"',
-    'Write-Output "tab to add notes | enter to submit answer | esc to interrupt"',
-    'Start-Sleep -Seconds 20',
-    '',
-  ].join('; ') + '\n'
-}
-
-function markClaudeActivityCommand(workspaceId: string): string {
-  const markerPath = join(ACTIVITY_DIR, `${workspaceId}.claude`)
-  return [
-    `$activityDir = ${psQuote(ACTIVITY_DIR)}`,
-    'New-Item -ItemType Directory -Path $activityDir -Force | Out-Null',
-    `New-Item -ItemType File -Path ${psQuote(markerPath)} -Force | Out-Null`,
-    '',
-  ].join('; ') + '\n'
-}
-
-function clearClaudeActivityCommand(workspaceId: string): string {
-  const markerPath = join(ACTIVITY_DIR, `${workspaceId}.claude`)
-  return `Remove-Item -Path ${psQuote(markerPath)} -Force -ErrorAction SilentlyContinue\n`
-}
+const ACTIVITY_DIR = join(tmpdir(), 'terminator-chat-activity')
 
 async function launchApp(): Promise<{ app: ElectronApplication; window: Page }> {
   const app = await electron.launch({ args: [appPath], env: { ...process.env, CI_TEST: '1' } })
   const window = await app.firstWindow()
   await window.waitForLoadState('domcontentloaded')
-  await window.waitForSelector('#root', { timeout: 10000 })
-  await window.waitForTimeout(1500)
+  await window.waitForSelector('#root', { timeout: 20000 })
+  await window.waitForTimeout(1000)
   return { app, window }
 }
 
-function createTestRepo(name: string): string {
-  const stamp = `${name}-${Date.now()}`
-  const repoPath = join(tmpdir(), `test-repo-${stamp}`)
-  const remotePath = join(tmpdir(), `test-remote-${stamp}.git`)
+function createWorkspaceFixture(name: string): {
+  repoPath: string
+  ws1Path: string
+  ws2Path: string
+} {
+  const base = join(tmpdir(), `tc-activity-${name}-${Date.now()}`)
+  const repoPath = join(base, 'repo')
+  const ws1Path = join(base, 'ws-1')
+  const ws2Path = join(base, 'ws-2')
   mkdirSync(repoPath, { recursive: true })
-  execSync('git init', { cwd: repoPath })
-  execSync('git checkout -b main', { cwd: repoPath })
-  writeFileSync(join(repoPath, 'README.md'), '# Test Repo\n')
-  execSync('git add .', { cwd: repoPath })
-  execSync('git commit -m "initial commit"', { cwd: repoPath })
-  execSync(`git init --bare "${remotePath}"`)
-  execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath })
-  execSync('git -c core.hooksPath=/dev/null push -u origin main', { cwd: repoPath })
-  return repoPath
+  mkdirSync(ws1Path, { recursive: true })
+  mkdirSync(ws2Path, { recursive: true })
+  return { repoPath, ws1Path, ws2Path }
 }
 
-async function setupWorkspace(window: Page, repoPath: string) {
-  return await window.evaluate(async ({ repo, shell }: { repo: string; shell: string }) => {
-    const store = (window as any).__store.getState()
-    store.hydrateState({ projects: [], workspaces: [] })
-
-    const projectId = crypto.randomUUID()
-    store.addProject({ id: projectId, name: 'test-repo', repoPath: repo })
-
-    const worktreePath = await (window as any).api.git.createWorktree(repo, 'ws-codex', 'branch-codex', true, 'main')
-    const workspaceId = crypto.randomUUID()
-    store.addWorkspace({
-      id: workspaceId,
-      name: 'ws-codex',
-      branch: 'branch-codex',
-      worktreePath,
-      projectId,
-    })
-
-    const ptyId = await (window as any).api.pty.create(worktreePath, shell, undefined, { AGENT_ORCH_WS_ID: workspaceId })
-    store.addTab({
-      id: crypto.randomUUID(),
-      workspaceId,
-      type: 'terminal',
-      title: 'Terminal',
-      ptyId,
-    })
-
-    return { workspaceId, ptyId }
-  }, { repo: repoPath, shell: TEST_TERMINAL })
+function clearWorkspaceMarkers(workspaceId: string): void {
+  mkdirSync(ACTIVITY_DIR, { recursive: true })
+  for (const fileName of readdirSync(ACTIVITY_DIR)) {
+    if (fileName.startsWith(`${workspaceId}.codex.`) || fileName.startsWith(`${workspaceId}.codex-wait.`)) {
+      try {
+        unlinkSync(join(ACTIVITY_DIR, fileName))
+      } catch {
+        // best effort cleanup
+      }
+    }
+  }
 }
 
-async function setupTwoWorkspaces(window: Page, repoPath: string) {
-  return await window.evaluate(async ({ repo, shell }: { repo: string; shell: string }) => {
+function writeActivityMarker(workspaceId: string, state: 'running' | 'waiting'): void {
+  mkdirSync(ACTIVITY_DIR, { recursive: true })
+  const suffix = state === 'waiting' ? 'codex-wait' : 'codex'
+  const markerPath = join(ACTIVITY_DIR, `${workspaceId}.${suffix}.${Date.now()}`)
+  writeFileSync(markerPath, '')
+}
+
+async function setupSingleWorkspace(window: Page, paths: { repoPath: string; ws1Path: string }) {
+  return await window.evaluate(async ({ repoPath, ws1Path }) => {
     const store = (window as any).__store.getState()
-    store.hydrateState({ projects: [], workspaces: [] })
+    store.hydrateState({ projects: [], workspaces: [], tabs: [] })
 
     const projectId = crypto.randomUUID()
-    store.addProject({ id: projectId, name: 'test-repo', repoPath: repo })
+    store.addProject({
+      id: projectId,
+      name: 'test-repo',
+      repoPath,
+      ownership: 'personal',
+    })
 
-    const worktreePath1 = await (window as any).api.git.createWorktree(repo, 'ws-codex-a', 'branch-codex-a', true, 'main')
-    const workspaceId1 = crypto.randomUUID()
+    const ws1Id = crypto.randomUUID()
     store.addWorkspace({
-      id: workspaceId1,
-      name: 'ws-codex-a',
-      branch: 'branch-codex-a',
-      worktreePath: worktreePath1,
+      id: ws1Id,
+      name: 'ws-1',
+      type: 'feature',
+      branch: 'branch-1',
+      worktreePath: ws1Path,
       projectId,
-    })
-    const ptyId1 = await (window as any).api.pty.create(worktreePath1, shell, undefined, { AGENT_ORCH_WS_ID: workspaceId1 })
-    store.addTab({
-      id: crypto.randomUUID(),
-      workspaceId: workspaceId1,
-      type: 'terminal',
-      title: 'Terminal',
-      ptyId: ptyId1,
+      agentPermissionMode: 'default',
+      memory: '',
     })
 
-    const worktreePath2 = await (window as any).api.git.createWorktree(repo, 'ws-codex-b', 'branch-codex-b', true, 'main')
-    const workspaceId2 = crypto.randomUUID()
+    const tabId = crypto.randomUUID()
+    store.addTab({
+      id: tabId,
+      workspaceId: ws1Id,
+      type: 'chat',
+      title: 'Thread 1',
+      threadId: crypto.randomUUID(),
+    })
+    store.setActiveWorkspace(ws1Id)
+    store.setActiveTab(tabId)
+
+    return { ws1Id }
+  }, paths)
+}
+
+async function setupTwoWorkspaces(window: Page, paths: { repoPath: string; ws1Path: string; ws2Path: string }) {
+  return await window.evaluate(async ({ repoPath, ws1Path, ws2Path }) => {
+    const store = (window as any).__store.getState()
+    store.hydrateState({ projects: [], workspaces: [], tabs: [] })
+
+    const projectId = crypto.randomUUID()
+    store.addProject({
+      id: projectId,
+      name: 'test-repo',
+      repoPath,
+      ownership: 'personal',
+    })
+
+    const ws1Id = crypto.randomUUID()
     store.addWorkspace({
-      id: workspaceId2,
-      name: 'ws-codex-b',
-      branch: 'branch-codex-b',
-      worktreePath: worktreePath2,
+      id: ws1Id,
+      name: 'ws-1',
+      type: 'feature',
+      branch: 'branch-1',
+      worktreePath: ws1Path,
       projectId,
+      agentPermissionMode: 'default',
+      memory: '',
     })
-    const ptyId2 = await (window as any).api.pty.create(worktreePath2, shell, undefined, { AGENT_ORCH_WS_ID: workspaceId2 })
+    const ws1TabId = crypto.randomUUID()
     store.addTab({
-      id: crypto.randomUUID(),
-      workspaceId: workspaceId2,
-      type: 'terminal',
-      title: 'Terminal',
-      ptyId: ptyId2,
+      id: ws1TabId,
+      workspaceId: ws1Id,
+      type: 'chat',
+      title: 'Thread 1',
+      threadId: crypto.randomUUID(),
     })
 
-    // Keep ws-b selected while ws-a runs in background.
-    store.setActiveWorkspace(workspaceId2)
+    const ws2Id = crypto.randomUUID()
+    store.addWorkspace({
+      id: ws2Id,
+      name: 'ws-2',
+      type: 'feature',
+      branch: 'branch-2',
+      worktreePath: ws2Path,
+      projectId,
+      agentPermissionMode: 'default',
+      memory: '',
+    })
+    const ws2TabId = crypto.randomUUID()
+    store.addTab({
+      id: ws2TabId,
+      workspaceId: ws2Id,
+      type: 'chat',
+      title: 'Thread 2',
+      threadId: crypto.randomUUID(),
+    })
 
-    return { workspaceId1, workspaceId2, ptyId1, ptyId2 }
-  }, { repo: repoPath, shell: TEST_TERMINAL })
+    store.setActiveWorkspace(ws2Id)
+    store.setActiveTab(ws2TabId)
+
+    return { ws1Id, ws2Id }
+  }, paths)
 }
 
 test.describe('Codex activity indicator', () => {
-  test('marks workspace active while codex process runs and clears when done', async () => {
-    const repoPath = createTestRepo('codex-activity')
+  test.beforeEach(() => {
+    mkdirSync(ACTIVITY_DIR, { recursive: true })
+  })
+
+  test('marks workspace running while codex marker exists and clears when removed', async () => {
+    const fixture = createWorkspaceFixture('running')
     const { app, window } = await launchApp()
 
     try {
-      const { workspaceId } = await setupWorkspace(window, repoPath)
-      await window.waitForTimeout(800)
+      const { ws1Id } = await setupSingleWorkspace(window, { repoPath: fixture.repoPath, ws1Path: fixture.ws1Path })
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForTimeout(700)
 
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([wsId])
-      }, workspaceId)
-
+      writeActivityMarker(ws1Id, 'running')
       await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId,
-        { timeout: 5000 }
+        (workspaceId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
       )
 
-      await window.evaluate(() => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([])
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForFunction(
+        (workspaceId: string) => !(window as any).__store.getState().activeClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
+      )
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('marks workspace waiting while codex waiting marker exists', async () => {
+    const fixture = createWorkspaceFixture('waiting')
+    const { app, window } = await launchApp()
+
+    try {
+      const { ws1Id } = await setupSingleWorkspace(window, { repoPath: fixture.repoPath, ws1Path: fixture.ws1Path })
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForTimeout(700)
+
+      writeActivityMarker(ws1Id, 'waiting')
+      await window.waitForFunction(
+        (workspaceId: string) => (window as any).__store.getState().waitingClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
+      )
+
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForFunction(
+        (workspaceId: string) => !(window as any).__store.getState().waitingClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
+      )
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('background completion marks workspace as completed and unread', async () => {
+    const fixture = createWorkspaceFixture('completed-unread')
+    const { app, window } = await launchApp()
+
+    try {
+      const { ws1Id } = await setupTwoWorkspaces(window, fixture)
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForTimeout(700)
+
+      writeActivityMarker(ws1Id, 'running')
+      await window.waitForFunction(
+        (workspaceId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
+      )
+
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForFunction(
+        (workspaceId: string) =>
+          (window as any).__store.getState().completedClaudeWorkspaceIds.has(workspaceId)
+          && (window as any).__store.getState().unreadWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 9000 },
+      )
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('running to waiting transition updates waiting state', async () => {
+    const fixture = createWorkspaceFixture('running-to-waiting')
+    const { app, window } = await launchApp()
+
+    try {
+      const { ws1Id } = await setupTwoWorkspaces(window, fixture)
+      clearWorkspaceMarkers(ws1Id)
+      await window.waitForTimeout(700)
+
+      writeActivityMarker(ws1Id, 'running')
+      await window.waitForFunction(
+        (workspaceId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 7000 },
+      )
+
+      clearWorkspaceMarkers(ws1Id)
+      writeActivityMarker(ws1Id, 'waiting')
+
+      await window.waitForFunction(
+        (workspaceId: string) =>
+          !(window as any).__store.getState().activeClaudeWorkspaceIds.has(workspaceId)
+          && (window as any).__store.getState().waitingClaudeWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 9000 },
+      )
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('waiting snapshot wins over running when both target same workspace', async () => {
+    const fixture = createWorkspaceFixture('waiting-priority')
+    const { app, window } = await launchApp()
+
+    try {
+      const { ws1Id } = await setupSingleWorkspace(window, {
+        repoPath: fixture.repoPath,
+        ws1Path: fixture.ws1Path,
       })
 
-      await window.waitForFunction(
-        (wsId: string) => !(window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId,
-        { timeout: 10000 }
-      )
-
-      const isActive = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId)
-      }, workspaceId)
-      expect(isActive).toBe(false)
-    } finally {
-      rmSync(FAKE_CODEX_BIN, { force: true })
-      await app.close()
-    }
-  })
-
-  test('marks background workspace unread when activity transitions to done', async () => {
-    const repoPath = createTestRepo('codex-unread')
-    const { app, window } = await launchApp()
-
-    try {
-      const { workspaceId1, workspaceId2 } = await setupTwoWorkspaces(window, repoPath)
-      await window.waitForTimeout(800)
-
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([wsId])
-      }, workspaceId1)
-
-      await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId1,
-        { timeout: 5000 }
-      )
-
-      // Ensure ws-b is still selected while ws-a finishes.
-      await window.evaluate((wsId: string) => {
-        ;(window as any).__store.getState().setActiveWorkspace(wsId)
-      }, workspaceId2)
-
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([])
-        state.markWorkspaceUnread(wsId)
-      }, workspaceId1)
-
-      await window.waitForFunction(
-        (wsId: string) => !(window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId1,
-        { timeout: 10000 }
-      )
-
-      await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(wsId),
-        workspaceId1,
-        { timeout: 5000 }
-      )
-
-      const hasUnread = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().unreadWorkspaceIds.has(wsId)
-      }, workspaceId1)
-      expect(hasUnread).toBe(true)
-    } finally {
-      rmSync(FAKE_CODEX_BIN, { force: true })
-      await app.close()
-    }
-  })
-
-  test('keeps Claude activity marker when another terminal in same workspace closes', async () => {
-    const repoPath = createTestRepo('claude-activity-multi-tab')
-    const { app, window } = await launchApp()
-
-    try {
-      const { workspaceId, ptyId: primaryPtyId } = await setupWorkspace(window, repoPath)
-      await window.waitForTimeout(800)
-
-      const secondaryPtyId = await window.evaluate(async ({ wsId, shell }: { wsId: string; shell: string }) => {
-        const state = (window as any).__store.getState()
-        const workspace = state.workspaces.find((w: { id: string; worktreePath: string }) => w.id === wsId)
-        if (!workspace) throw new Error('workspace not found')
-
-        const ptyId = await (window as any).api.pty.create(workspace.worktreePath, shell, undefined, { AGENT_ORCH_WS_ID: wsId })
-        state.addTab({
-          id: crypto.randomUUID(),
-          workspaceId: wsId,
-          type: 'terminal',
-          title: 'Terminal extra',
-          ptyId,
+      const stateAfterSnapshot = await window.evaluate((workspaceId: string) => {
+        const store = (window as any).__store.getState()
+        store.setWorkspaceAgentStatus(workspaceId, 'running')
+        store.setClaudeActivitySnapshot({
+          runningWorkspaceIds: [workspaceId],
+          waitingWorkspaceIds: [workspaceId],
+          runningAgentsByWorkspace: { [workspaceId]: 1 },
+          waitingAgentsByWorkspace: { [workspaceId]: 1 },
+          runningAgentCount: 1,
         })
-        return ptyId
-      }, { wsId: workspaceId, shell: TEST_TERMINAL })
+        const next = (window as any).__store.getState()
+        return {
+          isRunning: next.activeClaudeWorkspaceIds.has(workspaceId),
+          isWaiting: next.waitingClaudeWorkspaceIds.has(workspaceId),
+        }
+      }, ws1Id)
 
-      // Simulate Claude UserPromptSubmit hook writing its activity marker.
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([wsId])
-      }, workspaceId)
-
-      await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId,
-        { timeout: 5000 }
-      )
-
-      // Closing a different terminal in the same workspace should not clear Claude activity.
-      await window.evaluate((ptyId: string) => {
-        ;(window as any).api.pty.destroy(ptyId)
-      }, secondaryPtyId)
-      await window.waitForTimeout(1200)
-
-      const isStillActive = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId)
-      }, workspaceId)
-      expect(isStillActive).toBe(true)
-
-      await window.evaluate(() => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([])
-      })
+      expect(stateAfterSnapshot.isRunning).toBe(false)
+      expect(stateAfterSnapshot.isWaiting).toBe(true)
     } finally {
-      rmSync(FAKE_CODEX_BIN, { force: true })
-      await app.close()
-    }
-  })
-
-  test('shows unread when Codex asks a question before process exit', async () => {
-    const repoPath = createTestRepo('codex-question-unread')
-    const { app, window } = await launchApp()
-
-    try {
-      const { workspaceId1, workspaceId2, ptyId1 } = await setupTwoWorkspaces(window, repoPath)
-      await window.waitForTimeout(800)
-
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([wsId])
-      }, workspaceId1)
-
-      await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId1,
-        { timeout: 8000 }
-      )
-
-      await window.evaluate((wsId: string) => {
-        const state = (window as any).__store.getState()
-        state.setActiveClaudeWorkspaces([])
-      }, workspaceId1)
-
-      // Keep ws-b selected while ws-a asks a question in the background.
-      await window.evaluate((wsId: string) => {
-        ;(window as any).__store.getState().setActiveWorkspace(wsId)
-      }, workspaceId2)
-
-      // The question prompt should stop activity and mark unread before process exit.
-      await window.waitForFunction(
-        (wsId: string) => !(window as any).__store.getState().activeClaudeWorkspaceIds.has(wsId),
-        workspaceId1,
-        { timeout: 7000 }
-      )
-      await window.evaluate((wsId: string) => {
-        ;(window as any).__store.getState().markWorkspaceUnread(wsId)
-      }, workspaceId1)
-      await window.waitForFunction((wsId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(wsId), workspaceId1, { timeout: 7000 })
-    } finally {
-      rmSync(FAKE_CODEX_BIN, { force: true })
       await app.close()
     }
   })

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Allotment } from 'allotment'
 import { FluentProvider, webDarkTheme, webLightTheme, type Theme } from '@fluentui/react-components'
 import type { ThemeChangedPayload, ThemePreference } from '@shared/ipc-channels'
@@ -195,20 +195,33 @@ export function App() {
   usePrStatusPoller()
   const [osTheme, setOsTheme] = useState<ThemeChangedPayload>(DEFAULT_THEME)
   const isWindows = navigator.userAgent.toLowerCase().includes('windows')
+  const notifyToastDedupeRef = useRef(new Map<string, number>())
 
   // Listen for workspace notification signals from Claude Code hooks
   useEffect(() => {
     const unsub = window.api.claude.onNotifyWorkspace(({ workspaceId, reason }) => {
+      const dedupeKey = `${workspaceId}:${reason}`
+      const now = Date.now()
+      const last = notifyToastDedupeRef.current.get(dedupeKey) ?? 0
+      if ((now - last) < 1500) return
+      notifyToastDedupeRef.current.set(dedupeKey, now)
+
       const state = useAppStore.getState()
-      if (workspaceId !== state.activeWorkspaceId) {
+      const isDifferentWorkspace = workspaceId !== state.activeWorkspaceId
+      if (isDifferentWorkspace) {
         state.markWorkspaceUnread(workspaceId)
+      }
+      if (reason === 'completed') {
+        state.setWorkspaceAgentStatus(workspaceId, 'completed')
+      } else if (reason === 'waiting_input') {
+        state.setWorkspaceAgentStatus(workspaceId, 'waiting')
       }
 
       const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
       const message = reason === 'waiting_input'
         ? `Agent waiting for your input in ${workspaceName}`
         : `Agent completed in ${workspaceName}`
-      state.addToast({ id: crypto.randomUUID(), message, type: 'info' })
+      state.addToast({ id: crypto.randomUUID(), message, type: reason === 'completed' ? 'success' : 'info' })
     })
     return unsub
   }, [])
@@ -252,6 +265,7 @@ export function App() {
     commandPaletteVisible,
     runningAgentCount,
     waitingAgentCount,
+    completedClaudeWorkspaceIds,
   } = useAppStore()
   const unreadWorkspaceCount = useAppStore((s) => s.unreadWorkspaceIds.size)
 
@@ -260,6 +274,21 @@ export function App() {
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
   const activeAgents = runningAgentCount
   const waitingAgents = waitingAgentCount
+  const completedAgents = completedClaudeWorkspaceIds.size
+  const agentStatusText = activeAgents > 0
+    ? `${activeAgents} agents running`
+    : waitingAgents > 0
+      ? `${waitingAgents} waiting for input`
+      : completedAgents > 0
+        ? `${completedAgents} completed`
+        : 'Agents idle'
+  const agentStatusDotClass = activeAgents > 0
+    ? styles.dotRunning
+    : waitingAgents > 0
+      ? styles.dotWaiting
+      : completedAgents > 0
+        ? styles.dotCompleted
+        : styles.dotIdle
   const appStyle = {
     '--window-controls-width': isWindows ? '132px' : '0px',
     '--window-controls-width-tabbar': isWindows && !rightPanelOpen ? '132px' : '0px',
@@ -269,6 +298,10 @@ export function App() {
   useEffect(() => {
     window.api.app.setUnreadCount(unreadWorkspaceCount)
   }, [unreadWorkspaceCount])
+
+  useEffect(() => {
+    window.api.app.setActiveWorkspace(activeWorkspaceId)
+  }, [activeWorkspaceId])
 
   useEffect(() => {
     const unsub = window.api.app.onThemeChanged((payload) => {
@@ -406,14 +439,8 @@ export function App() {
               <span>{wsTabs.length} tabs</span>
             </div>
             <div className={styles.statusItem}>
-              <span className={`${styles.dot} ${activeAgents > 0 ? styles.dotConnected : styles.dotIdle}`} />
-              <span>
-                {activeAgents > 0
-                  ? `${activeAgents} agents running`
-                  : waitingAgents > 0
-                    ? `${waitingAgents} waiting for input`
-                    : 'Agents idle'}
-              </span>
+              <span className={`${styles.dot} ${agentStatusDotClass}`} />
+              <span>{agentStatusText}</span>
             </div>
           </div>
         </div>

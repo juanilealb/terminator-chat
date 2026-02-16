@@ -19,6 +19,7 @@ import { CREATE_WORKTREE_STAGES, type CreateWorktreeProgressEvent } from '../sha
 import { registerIpcHandlers } from './ipc'
 import { NotificationWatcher } from './notification-watcher'
 import { loadWindowState, saveWindowState } from './window-state'
+import { clearWindowActiveWorkspace } from './workspace-presence'
 
 let mainWindow: BrowserWindow | null = null
 const notificationWatcher = new NotificationWatcher()
@@ -191,9 +192,13 @@ function createWindow(): void {
   }
 
   mainWindow = new BrowserWindow(windowOptions)
+  const windowRef = mainWindow
   mainWindow.removeMenu()
   mainWindow.setMenuBarVisibility(false)
   syncUnreadOverlay()
+  windowRef.on('closed', () => {
+    clearWindowActiveWorkspace(windowRef)
+  })
   mainWindow.on('move', scheduleWindowStateSave)
   mainWindow.on('resize', scheduleWindowStateSave)
   mainWindow.on('maximize', () => {

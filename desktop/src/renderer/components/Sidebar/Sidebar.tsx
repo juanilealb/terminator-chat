@@ -435,6 +435,7 @@ export function Sidebar() {
   const unreadWorkspaceIds = useAppStore((s) => s.unreadWorkspaceIds);
   const activeClaudeWorkspaceIds = useAppStore((s) => s.activeClaudeWorkspaceIds);
   const waitingClaudeWorkspaceIds = useAppStore((s) => s.waitingClaudeWorkspaceIds);
+  const completedClaudeWorkspaceIds = useAppStore((s) => s.completedClaudeWorkspaceIds);
   const renameWorkspace = useAppStore((s) => s.renameWorkspace);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const setPrStatuses = useAppStore((s) => s.setPrStatuses);
@@ -1155,14 +1156,15 @@ export function Sidebar() {
                         const metaBranch = workspace.branch || basenameSafe(workspace.worktreePath);
                         const isRunning = activeClaudeWorkspaceIds.has(workspace.id);
                         const isWaiting = !isRunning && waitingClaudeWorkspaceIds.has(workspace.id);
-                        const isUnread = !isRunning && !isWaiting && unreadWorkspaceIds.has(workspace.id);
+                        const isCompleted = !isRunning && !isWaiting && completedClaudeWorkspaceIds.has(workspace.id);
+                        const isUnread = !isRunning && !isWaiting && !isCompleted && unreadWorkspaceIds.has(workspace.id);
 
                         return (
                           <div key={tab.id} className={styles.threadTreeRow}>
                             <div
                               className={`${styles.workspaceItem} ${
                                 tab.id === activeTabId ? styles.active : ""
-                              } ${isUnread ? styles.unread : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
+                              } ${isUnread ? styles.unread : ""} ${isCompleted ? styles.completed : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
                               onClick={() => {
                                 setActiveWorkspace(workspace.id);
                                 setActiveTab(tab.id);

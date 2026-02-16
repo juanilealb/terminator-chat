@@ -1,5 +1,6 @@
 import { type BrowserWindow } from 'electron'
-import { IPC } from '../shared/ipc-channels'
+import { IPC, type ChatEventPayload, type ChatLifecyclePhase } from '../shared/ipc-channels'
+import { notifyWorkspace } from './agent-notifier'
 
 // Lazy-import the SDK so that if it fails to load (e.g. on Windows where the
 // codex binary may not exist) the rest of the main process still works.
@@ -25,9 +26,15 @@ export type CodexThreadOptions = {
   approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
 }
 
+interface ThreadContext {
+  thread: any
+  workspaceId: string | null
+  turnSequence: number
+}
+
 export class CodexService {
   private codex: any = null
-  private threads = new Map<string, any>()
+  private threads = new Map<string, ThreadContext>()
   private abortControllers = new Map<string, AbortController>()
   private pendingCancelThreads = new Set<string>()
 
@@ -49,6 +56,7 @@ export class CodexService {
     model?: string,
     effort?: string,
     threadOptions?: CodexThreadOptions,
+    workspaceId?: string,
   ): string {
     if (!this.codex) throw new Error('Not logged in. Sign in with your ChatGPT account first.')
     const opts: Record<string, unknown> = {
@@ -61,19 +69,85 @@ export class CodexService {
     if (threadOptions?.approvalMode) opts.approvalPolicy = threadOptions.approvalMode
     const thread = this.codex.startThread(opts)
     const id = crypto.randomUUID()
-    this.threads.set(id, thread)
+    this.threads.set(id, {
+      thread,
+      workspaceId: workspaceId ?? null,
+      turnSequence: 0,
+    })
     return id
   }
 
-  async sendMessage(threadId: string, input: CodexUserInput, win: BrowserWindow): Promise<void> {
-    const thread = this.threads.get(threadId)
-    if (!thread) {
-      win.webContents.send(IPC.CHAT_EVENT, {
+  async sendMessage(threadId: string, input: CodexUserInput, win: BrowserWindow): Promise<{ accepted: true; turnId: string }> {
+    const context = this.threads.get(threadId)
+    if (!context) {
+      this.emitEvent(win, {
         threadId,
         type: 'error',
+        phase: 'error',
         data: { type: 'error', id: '', message: 'Thread not found' },
       })
-      return
+      return { accepted: true, turnId: '' }
+    }
+
+    const turnId = `${threadId}:${context.turnSequence + 1}`
+    context.turnSequence += 1
+    this.emitEvent(win, {
+      threadId,
+      workspaceId: context.workspaceId ?? undefined,
+      turnId,
+      type: 'turn.started',
+      phase: 'turn.started',
+      data: { type: 'turn.started' },
+    })
+
+    // Fire-and-forget streaming so the IPC invoke resolves immediately.
+    void this.runTurn(context, threadId, turnId, input, win)
+
+    return { accepted: true, turnId }
+  }
+
+  private async runTurn(
+    context: ThreadContext,
+    threadId: string,
+    turnId: string,
+    input: CodexUserInput,
+    win: BrowserWindow,
+  ): Promise<void> {
+    const { thread, workspaceId } = context
+    const normalizedWorkspaceId = workspaceId ?? undefined
+    const waitingNotified = { value: false }
+    let emittedTerminalPhase = false
+
+    const emitTerminalPhase = (type: 'turn.completed' | 'turn.failed' | 'turn.cancelled', data: Record<string, unknown>) => {
+      if (emittedTerminalPhase) return
+      emittedTerminalPhase = true
+      this.emitEvent(win, {
+        threadId,
+        workspaceId: normalizedWorkspaceId,
+        turnId,
+        type,
+        phase: type,
+        data,
+      })
+
+      if (!workspaceId) return
+      if (type === 'turn.completed') {
+        notifyWorkspace(workspaceId, 'completed', { turnId, source: 'chat' })
+      }
+    }
+
+    const emitWaitingInput = () => {
+      if (!workspaceId || waitingNotified.value) return
+      waitingNotified.value = true
+      this.emitEvent(win, {
+        threadId,
+        workspaceId: normalizedWorkspaceId,
+        turnId,
+        type: 'turn.waiting_input',
+        phase: 'turn.waiting_input',
+        data: { type: 'turn.waiting_input' },
+      })
+      notifyWorkspace(workspaceId, 'waiting_input', { turnId, source: 'chat' })
     }
 
     const controller = new AbortController()
@@ -83,49 +157,83 @@ export class CodexService {
       this.pendingCancelThreads.delete(threadId)
     }
 
-    let emittedSyntheticTurnCompleted = false
-    const emitTurnCompletedIfNeeded = () => {
-      if (emittedSyntheticTurnCompleted || win.isDestroyed()) return
-      emittedSyntheticTurnCompleted = true
-      win.webContents.send(IPC.CHAT_EVENT, {
-        threadId,
-        type: 'turn.completed',
-        data: { type: 'turn.completed' },
-      })
-    }
-
     try {
       const { events } = await thread.runStreamed(input, { signal: controller.signal })
       for await (const event of events) {
         if (controller.signal.aborted) {
-          emitTurnCompletedIfNeeded()
+          emitTerminalPhase('turn.cancelled', { type: 'turn.cancelled' })
           break
         }
         if (win.isDestroyed()) break
-        win.webContents.send(IPC.CHAT_EVENT, {
+
+        const serialized = serializeEvent(event)
+        if (event.type === 'turn.completed') {
+          emitTerminalPhase('turn.completed', serialized)
+          continue
+        }
+        if (event.type === 'turn.failed' || event.type === 'error') {
+          emitTerminalPhase('turn.failed', serialized)
+          continue
+        }
+        if (event.type === 'turn.started') {
+          continue
+        }
+
+        this.emitEvent(win, {
           threadId,
+          workspaceId: normalizedWorkspaceId,
+          turnId,
           type: event.type,
-          data: serializeEvent(event),
+          phase: mapPhase(event.type),
+          data: serialized,
         })
+
+        if (event.type === 'item.started' || event.type === 'item.updated' || event.type === 'item.completed') {
+          if (looksLikeWaitingInput(serialized)) {
+            emitWaitingInput()
+          }
+        }
+      }
+
+      if (controller.signal.aborted) {
+        emitTerminalPhase('turn.cancelled', { type: 'turn.cancelled' })
       }
     } catch (err) {
-      if (!win.isDestroyed()) {
-        const message = err instanceof Error ? err.message : 'Unknown error'
-        // Don't report abort as an error
-        if (controller.signal.aborted) {
-          emitTurnCompletedIfNeeded()
-        } else {
-          win.webContents.send(IPC.CHAT_EVENT, {
-            threadId,
-            type: 'error',
-            data: { type: 'error', id: '', message },
-          })
-        }
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      if (controller.signal.aborted) {
+        emitTerminalPhase('turn.cancelled', { type: 'turn.cancelled' })
+      } else {
+        emitTerminalPhase('turn.failed', { type: 'turn.failed', message })
       }
     } finally {
       this.abortControllers.delete(threadId)
       this.pendingCancelThreads.delete(threadId)
     }
+  }
+
+  private emitEvent(
+    win: BrowserWindow,
+    payload: {
+      threadId: string
+      type: string
+      phase: ChatLifecyclePhase
+      data: Record<string, unknown>
+      workspaceId?: string
+      turnId?: string
+    },
+  ): void {
+    if (win.isDestroyed()) return
+    const event: ChatEventPayload = {
+      eventId: crypto.randomUUID(),
+      ts: Date.now(),
+      threadId: payload.threadId,
+      workspaceId: payload.workspaceId,
+      turnId: payload.turnId,
+      type: payload.type,
+      phase: payload.phase,
+      data: payload.data,
+    }
+    win.webContents.send(IPC.CHAT_EVENT, event)
   }
 
   cancelTurn(threadId: string): void {
@@ -146,8 +254,22 @@ export class CodexService {
   }
 
   destroyThread(threadId: string): void {
+    const controller = this.abortControllers.get(threadId)
+    if (controller) controller.abort()
+    this.abortControllers.delete(threadId)
+    this.pendingCancelThreads.delete(threadId)
     this.threads.delete(threadId)
   }
+}
+
+function mapPhase(type: string): ChatLifecyclePhase {
+  if (type === 'turn.started') return 'turn.started'
+  if (type === 'turn.completed') return 'turn.completed'
+  if (type === 'turn.failed') return 'turn.failed'
+  if (type === 'error') return 'error'
+  if (type === 'thread.started') return 'thread.started'
+  if (type === 'item.started' || type === 'item.updated' || type === 'item.completed') return 'item.delta'
+  return 'unknown'
 }
 
 function serializeEvent(event: any): Record<string, unknown> {
@@ -169,6 +291,15 @@ function serializeEvent(event: any): Record<string, unknown> {
     default:
       return { type: 'unknown' }
   }
+}
+
+function looksLikeWaitingInput(data: Record<string, unknown>): boolean {
+  if (data.type !== 'agent_message') return false
+  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  if (!text) return false
+  if (/^question\s+\d+\/\d+/i.test(text)) return true
+  if (/tab to add notes|enter to submit answer|esc to interrupt/i.test(text)) return true
+  return false
 }
 
 function serializeItem(item: any): Record<string, unknown> {

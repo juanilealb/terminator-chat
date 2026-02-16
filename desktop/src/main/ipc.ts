@@ -16,6 +16,7 @@ import { CodexService } from './codex-service'
 import * as openaiAuth from './openai-auth'
 import { trustPathForClaude, loadClaudeSettings, saveClaudeSettings, loadJsonFile, saveJsonFile } from './claude-config'
 import { loadCodexConfigText, loadCodexModelOptions, saveCodexConfigText } from './codex-config'
+import { setWindowActiveWorkspace } from './workspace-presence'
 
 const codexService = new CodexService()
 
@@ -495,6 +496,16 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
       ? Math.max(0, Math.floor(count))
       : 0
     options.onUnreadCountChanged?.(normalizedCount)
+  })
+
+  ipcMain.on(IPC.APP_SET_ACTIVE_WORKSPACE, (_e, workspaceId: unknown) => {
+    const win = BrowserWindow.fromWebContents(_e.sender)
+    if (!win) return
+    if (typeof workspaceId === 'string' && workspaceId.trim().length > 0) {
+      setWindowActiveWorkspace(win, workspaceId)
+      return
+    }
+    setWindowActiveWorkspace(win, null)
   })
 
   ipcMain.on(IPC.APP_SET_THEME_SOURCE, (_e, themePreference: unknown) => {
@@ -1008,38 +1019,35 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
         sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
         approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
       },
+      workspaceId?: string,
     ) => {
-    // Refresh token if needed before creating thread
-    try {
-      const token = await openaiAuth.refreshIfNeeded()
-      await codexService.setAccessToken(token)
-    } catch {
-      // Token may still be valid, let it try
-    }
-      return codexService.createThread(workingDir, model, effort, options)
+      // Refresh token if needed before creating thread
+      try {
+        const token = await openaiAuth.refreshIfNeeded()
+        await codexService.setAccessToken(token)
+      } catch {
+        // Token may still be valid, let it try
+      }
+      return codexService.createThread(workingDir, model, effort, options, workspaceId)
     },
   )
 
   ipcMain.handle(IPC.CHAT_SEND, async (e, threadId: string, input: unknown) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return
-    await codexService.sendMessage(threadId, input as any, win)
+    return codexService.sendMessage(threadId, input as any, win)
   })
 
   ipcMain.handle(IPC.CHAT_CANCEL, async (_e, threadId: string) => {
     codexService.cancelTurn(threadId)
   })
 
+  ipcMain.handle(IPC.CHAT_DESTROY_THREAD, async (_e, threadId: string) => {
+    codexService.destroyThread(threadId)
+  })
+
   ipcMain.handle(IPC.CHAT_RESUME, async (_e, threadId: string) => {
     return codexService.resumeThread(threadId)
   })
-}
-
-export function sendActivateWorkspace(workspaceId: string): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
-      win.webContents.send(IPC.ACTIVATE_WORKSPACE, workspaceId)
-    }
-  }
 }
 

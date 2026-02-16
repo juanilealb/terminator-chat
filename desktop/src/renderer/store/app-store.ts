@@ -89,6 +89,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   unreadWorkspaceIds: new Set<string>(),
   activeClaudeWorkspaceIds: new Set<string>(),
   waitingClaudeWorkspaceIds: new Set<string>(),
+  completedClaudeWorkspaceIds: new Set<string>(),
   runningAgentCount: 0,
   waitingAgentCount: 0,
   prStatusMap: new Map(),
@@ -97,6 +98,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatMessages: {},
   codexLoggedIn: false,
   chatThread: null,
+  _fileWatcherRunningIds: new Set<string>(),
+  _fileWatcherWaitingIds: new Set<string>(),
 
   addProject: (project) =>
     set((s) => ({
@@ -123,6 +126,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const waitingClaudeWorkspaceIds = new Set(
         Array.from(s.waitingClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
       )
+      const completedClaudeWorkspaceIds = new Set(
+        Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
+      )
       for (const wsId of removedWsIds) delete tabMap[wsId]
       return {
         projects: s.projects.filter((p) => p.id !== id),
@@ -130,6 +136,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         unreadWorkspaceIds,
         activeClaudeWorkspaceIds,
         waitingClaudeWorkspaceIds,
+        completedClaudeWorkspaceIds,
         runningAgentCount: activeClaudeWorkspaceIds.size,
         waitingAgentCount: waitingClaudeWorkspaceIds.size,
         lastActiveTabByWorkspace: tabMap,
@@ -149,9 +156,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const newUnread = new Set(s.unreadWorkspaceIds)
       const newActiveClaude = new Set(s.activeClaudeWorkspaceIds)
       const newWaitingClaude = new Set(s.waitingClaudeWorkspaceIds)
+      const newCompletedClaude = new Set(s.completedClaudeWorkspaceIds)
       newUnread.delete(id)
       newActiveClaude.delete(id)
       newWaitingClaude.delete(id)
+      newCompletedClaude.delete(id)
       const tabMap = { ...s.lastActiveTabByWorkspace }
       delete tabMap[id]
       return {
@@ -160,6 +169,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         unreadWorkspaceIds: newUnread,
         activeClaudeWorkspaceIds: newActiveClaude,
         waitingClaudeWorkspaceIds: newWaitingClaude,
+        completedClaudeWorkspaceIds: newCompletedClaude,
         runningAgentCount: newActiveClaude.size,
         waitingAgentCount: newWaitingClaude.size,
         lastActiveTabByWorkspace: tabMap,
@@ -204,7 +214,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const wsTabs = s.tabs.filter((t) => t.workspaceId === id)
       const newUnread = new Set(s.unreadWorkspaceIds)
+      const newCompleted = new Set(s.completedClaudeWorkspaceIds)
       if (id) newUnread.delete(id)
+      if (id) newCompleted.delete(id)
 
       // Restore remembered tab, falling back to first tab
       const remembered = id ? tabMap[id] : null
@@ -217,6 +229,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeTabId,
         lastActiveTabByWorkspace: tabMap,
         unreadWorkspaceIds: newUnread,
+        completedClaudeWorkspaceIds: newCompleted,
       }
     }),
 
@@ -879,25 +892,87 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { unreadWorkspaceIds: newUnread }
     }),
 
+  setWorkspaceAgentStatus: (workspaceId, status) =>
+    set((s) => {
+      if (!workspaceId) return s
+
+      const activeClaudeWorkspaceIds = new Set(s.activeClaudeWorkspaceIds)
+      const waitingClaudeWorkspaceIds = new Set(s.waitingClaudeWorkspaceIds)
+      const completedClaudeWorkspaceIds = new Set(s.completedClaudeWorkspaceIds)
+
+      if (status === 'running') {
+        activeClaudeWorkspaceIds.add(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      } else if (status === 'waiting') {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.add(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      } else if (status === 'completed') {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        if (workspaceId !== s.activeWorkspaceId) {
+          completedClaudeWorkspaceIds.add(workspaceId)
+        } else {
+          completedClaudeWorkspaceIds.delete(workspaceId)
+        }
+      } else {
+        activeClaudeWorkspaceIds.delete(workspaceId)
+        waitingClaudeWorkspaceIds.delete(workspaceId)
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      }
+
+      return {
+        activeClaudeWorkspaceIds,
+        waitingClaudeWorkspaceIds,
+        completedClaudeWorkspaceIds,
+        runningAgentCount: activeClaudeWorkspaceIds.size,
+        waitingAgentCount: waitingClaudeWorkspaceIds.size,
+      }
+    }),
+
   setActiveClaudeWorkspaces: (workspaceIds) =>
-    set(() => ({
+    set((s) => ({
       activeClaudeWorkspaceIds: new Set(workspaceIds),
       runningAgentCount: workspaceIds.length,
       waitingClaudeWorkspaceIds: new Set(),
       waitingAgentCount: 0,
+      completedClaudeWorkspaceIds: new Set(
+        Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !workspaceIds.includes(wsId)),
+      ),
     })),
 
   setClaudeActivitySnapshot: (snapshot) =>
-    set(() => {
-      const waitingAgentCount = Object.values(snapshot.waitingAgentsByWorkspace).reduce(
-        (sum, count) => sum + count,
-        0,
+    set((s) => {
+      const fwRunning = new Set(snapshot.runningWorkspaceIds)
+      const fwWaiting = new Set(snapshot.waitingWorkspaceIds)
+      const previousFileWatcherIds = new Set([
+        ...s._fileWatcherRunningIds,
+        ...s._fileWatcherWaitingIds,
+      ])
+
+      // Keep IDs managed by ChatPanel (those not owned by previous file-watcher snapshot).
+      const chatRunning = [...s.activeClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
+      const chatWaiting = [...s.waitingClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
+
+      const mergedWaiting = new Set([...fwWaiting, ...chatWaiting])
+      // Waiting for input has higher UX priority than running.
+      const mergedRunning = new Set(
+        [...fwRunning, ...chatRunning].filter((id) => !mergedWaiting.has(id)),
       )
+
       return {
-        activeClaudeWorkspaceIds: new Set(snapshot.runningWorkspaceIds),
-        waitingClaudeWorkspaceIds: new Set(snapshot.waitingWorkspaceIds),
-        runningAgentCount: snapshot.runningAgentCount,
-        waitingAgentCount,
+        _fileWatcherRunningIds: fwRunning,
+        _fileWatcherWaitingIds: fwWaiting,
+        activeClaudeWorkspaceIds: mergedRunning,
+        waitingClaudeWorkspaceIds: mergedWaiting,
+        completedClaudeWorkspaceIds: new Set(
+          [...s.completedClaudeWorkspaceIds].filter(
+            (id) => !mergedRunning.has(id) && !mergedWaiting.has(id),
+          ),
+        ),
+        runningAgentCount: mergedRunning.size,
+        waitingAgentCount: mergedWaiting.size,
       }
     }),
 
@@ -1070,37 +1145,6 @@ export async function hydrateFromDisk(): Promise<void> {
     // ignore — auth check is best-effort
   }
 
-  // Listen for chat events from Codex service in main process
-  window.api.chat.onEvent((event) => {
-    const store = useAppStore.getState()
-    const { threadId, type, data } = event
-
-    if (type === 'message.completed' && data && typeof data === 'object' && 'content' in data) {
-      const msg = data as { id: string; role: 'assistant'; content: string }
-      store.chatMessages[threadId] // check exists
-      useAppStore.setState((s) => ({
-        chatMessages: {
-          ...s.chatMessages,
-          [threadId]: [
-            ...(s.chatMessages[threadId] ?? []),
-            {
-              id: msg.id ?? crypto.randomUUID(),
-              role: 'assistant',
-              content: msg.content,
-              timestamp: Date.now(),
-            },
-          ],
-        },
-      }))
-    }
-
-    if (type === 'error' && data && typeof data === 'object' && 'message' in data) {
-      store.addToast({
-        id: crypto.randomUUID(),
-        message: `Chat error: ${(data as { message: string }).message}`,
-        type: 'error',
-      })
-    }
-  })
+  // Chat stream events are handled in ChatPanel instances bound to live threads.
+  // Keeping event-to-message mapping local to the panel avoids stale global listeners.
 }
-

@@ -8,8 +8,12 @@ export interface ThemeChangedPayload {
 export type AgentNotifyReason = 'completed' | 'waiting_input'
 
 export interface AgentNotifyEvent {
+  notifyId: string
+  ts: number
   workspaceId: string
   reason: AgentNotifyReason
+  turnId?: string
+  source?: 'hook' | 'chat'
 }
 
 export interface AgentActivitySnapshot {
@@ -18,6 +22,28 @@ export interface AgentActivitySnapshot {
   runningAgentsByWorkspace: Record<string, number>
   waitingAgentsByWorkspace: Record<string, number>
   runningAgentCount: number
+}
+
+export type ChatLifecyclePhase =
+  | 'thread.started'
+  | 'turn.started'
+  | 'item.delta'
+  | 'turn.waiting_input'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'turn.cancelled'
+  | 'error'
+  | 'unknown'
+
+export interface ChatEventPayload {
+  eventId: string
+  threadId: string
+  workspaceId?: string
+  turnId?: string
+  type: string
+  phase: ChatLifecyclePhase
+  ts: number
+  data: Record<string, unknown>
 }
 
 // IPC channel constants shared between main and renderer
@@ -61,6 +87,7 @@ export const IPC = {
   APP_ADD_PROJECT_PATH: 'app:add-project-path',
   APP_GET_DATA_PATH: 'app:get-data-path',
   APP_SET_UNREAD_COUNT: 'app:set-unread-count',
+  APP_SET_ACTIVE_WORKSPACE: 'app:set-active-workspace',
   APP_OPEN_DIRECTORY: 'app:open-directory',
   APP_SET_THEME_SOURCE: 'app:set-theme-source',
   APP_WINDOW_MINIMIZE: 'app:window-minimize',
@@ -94,6 +121,7 @@ export const IPC = {
   CHAT_CREATE_THREAD: 'chat:create-thread',
   CHAT_SEND: 'chat:send',
   CHAT_CANCEL: 'chat:cancel',
+  CHAT_DESTROY_THREAD: 'chat:destroy-thread',
   CHAT_EVENT: 'chat:event',
   CHAT_RESUME: 'chat:resume',
 

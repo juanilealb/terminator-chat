@@ -180,6 +180,7 @@ export interface AppState {
   unreadWorkspaceIds: Set<string>
   activeClaudeWorkspaceIds: Set<string>
   waitingClaudeWorkspaceIds: Set<string>
+  completedClaudeWorkspaceIds: Set<string>
   runningAgentCount: number
   waitingAgentCount: number
   prStatusMap: Map<string, PrInfo | null>
@@ -249,6 +250,10 @@ export interface AppState {
   // Unread indicator actions
   markWorkspaceUnread: (workspaceId: string) => void
   clearWorkspaceUnread: (workspaceId: string) => void
+  setWorkspaceAgentStatus: (
+    workspaceId: string,
+    status: 'running' | 'waiting' | 'idle' | 'completed',
+  ) => void
 
   // Agent activity actions (Claude + Codex)
   setActiveClaudeWorkspaces: (workspaceIds: string[]) => void

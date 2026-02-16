@@ -48,6 +48,57 @@ function CursorLogo() {
   )
 }
 
+function resolveTabLabel(tab: Tab): string {
+  if (tab.type === 'chat') return 'Chat'
+  if (tab.type === 'file') return basenameSafe(toPosixPath(tab.filePath))
+  return 'Changes'
+}
+
+function TabPill({
+  tab,
+  isActive,
+  onSelect,
+  onClose,
+}: {
+  tab: Tab
+  isActive: boolean
+  onSelect: () => void
+  onClose?: () => void
+}) {
+  const label = resolveTabLabel(tab)
+  return (
+    <button
+      type="button"
+      className={`${styles.tabPill} ${isActive ? styles.tabPillActive : ''}`}
+      onClick={onSelect}
+      title={tab.type === 'file' ? toPosixPath(tab.filePath) : label}
+    >
+      <span className={styles.tabPillLabel}>{label}</span>
+      {tab.type === 'file' && tab.unsaved && <span className={styles.tabPillUnsavedDot} />}
+      {onClose && (
+        <span
+          role="button"
+          tabIndex={0}
+          className={styles.tabPillClose}
+          onClick={(e) => {
+            e.stopPropagation()
+            onClose()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.stopPropagation()
+              onClose()
+            }
+          }}
+          aria-label={`Close ${label}`}
+        >
+          {'\u00d7'}
+        </span>
+      )}
+    </button>
+  )
+}
+
 export function TabBar() {
   const {
     activeWorkspaceId,
@@ -58,11 +109,36 @@ export function TabBar() {
     addToast,
     rightPanelOpen,
     toggleRightPanel,
+    setActiveTab,
+    removeTab,
+    showConfirmDialog,
+    dismissConfirmDialog,
+    settings,
   } = useAppStore()
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId && tab.workspaceId === activeWorkspaceId)
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId)
   const headerTitle = resolveHeaderTitle(activeTab, chatMessages)
+  const wsTabs = tabs.filter((t) => t.workspaceId === activeWorkspaceId)
+
+  const handleCloseTab = (tabId: string) => {
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+    if (tab.type === 'file' && tab.unsaved && settings.confirmOnClose) {
+      showConfirmDialog({
+        title: 'Unsaved changes',
+        message: 'This file has unsaved changes. Close anyway?',
+        confirmLabel: 'Close',
+        destructive: true,
+        onConfirm: () => {
+          removeTab(tabId)
+          dismissConfirmDialog()
+        },
+      })
+      return
+    }
+    removeTab(tabId)
+  }
 
   const handleOpenEditor = async (editor: 'vscode' | 'cursor') => {
     if (!activeWorkspace?.worktreePath) {
@@ -92,11 +168,27 @@ export function TabBar() {
 
   return (
     <div className={styles.tabBar}>
-      <div className={styles.titleArea}>
-        <span className={styles.threadTitle} title={headerTitle}>
-          {headerTitle}
-        </span>
-      </div>
+      {wsTabs.length > 1 ? (
+        <div className={styles.tabStripArea}>
+          <div className={styles.tabStrip}>
+            {wsTabs.map((tab) => (
+              <TabPill
+                key={tab.id}
+                tab={tab}
+                isActive={tab.id === activeTabId}
+                onSelect={() => setActiveTab(tab.id)}
+                onClose={tab.type === 'chat' ? undefined : () => handleCloseTab(tab.id)}
+              />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className={styles.titleArea}>
+          <span className={styles.threadTitle} title={headerTitle}>
+            {headerTitle}
+          </span>
+        </div>
+      )}
 
       <div className={styles.rightControls}>
         <div className={styles.openSplit}>
