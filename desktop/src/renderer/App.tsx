@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Allotment } from 'allotment'
 import { FluentProvider, webDarkTheme, webLightTheme, type Theme } from '@fluentui/react-components'
 import type { ThemeChangedPayload, ThemePreference } from '@shared/ipc-channels'
@@ -195,15 +195,22 @@ export function App() {
   usePrStatusPoller()
   const [osTheme, setOsTheme] = useState<ThemeChangedPayload>(DEFAULT_THEME)
   const isWindows = navigator.userAgent.toLowerCase().includes('windows')
+  const notifyToastDedupeRef = useRef(new Map<string, number>())
 
   // Listen for workspace notification signals from Claude Code hooks
   useEffect(() => {
     const unsub = window.api.claude.onNotifyWorkspace(({ workspaceId, reason }) => {
-      const state = useAppStore.getState()
-      const isBackground = workspaceId !== state.activeWorkspaceId
-      if (!isBackground) return
+      const dedupeKey = `${workspaceId}:${reason}`
+      const now = Date.now()
+      const last = notifyToastDedupeRef.current.get(dedupeKey) ?? 0
+      if ((now - last) < 1500) return
+      notifyToastDedupeRef.current.set(dedupeKey, now)
 
-      state.markWorkspaceUnread(workspaceId)
+      const state = useAppStore.getState()
+      const isDifferentWorkspace = workspaceId !== state.activeWorkspaceId
+      if (isDifferentWorkspace) {
+        state.markWorkspaceUnread(workspaceId)
+      }
       if (reason === 'completed') {
         state.setWorkspaceAgentStatus(workspaceId, 'completed')
       } else if (reason === 'waiting_input') {
@@ -214,7 +221,7 @@ export function App() {
       const message = reason === 'waiting_input'
         ? `Agent waiting for your input in ${workspaceName}`
         : `Agent completed in ${workspaceName}`
-      state.addToast({ id: crypto.randomUUID(), message, type: 'info' })
+      state.addToast({ id: crypto.randomUUID(), message, type: reason === 'completed' ? 'success' : 'info' })
     })
     return unsub
   }, [])

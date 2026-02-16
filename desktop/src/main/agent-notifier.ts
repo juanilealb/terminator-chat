@@ -6,6 +6,8 @@ import { isWorkspaceInBackground } from './workspace-presence'
 
 const lastNotifiedAtByKey = new Map<string, number>()
 const DEFAULT_DEDUPE_MS = 10_000
+const CROSS_SOURCE_DEDUPE_MS = 1_200
+const NO_TURN_DEDUPE_MS = 1_500
 
 function getNotificationIcon() {
   const candidates = [
@@ -66,8 +68,15 @@ export function notifyWorkspace(
 ): void {
   if (!workspaceId) return
 
-  const dedupeKey = `${workspaceId}:${reason}:${options?.turnId ?? 'no-turn'}`
-  if (shouldSkipNotification(dedupeKey, options?.dedupeMs ?? DEFAULT_DEDUPE_MS)) return
+  const dedupeMs = options?.dedupeMs ?? DEFAULT_DEDUPE_MS
+  const detailKey = `${workspaceId}:${reason}:${options?.turnId ?? `source:${options?.source ?? 'unknown'}`}`
+  const detailDedupeMs = options?.turnId
+    ? dedupeMs
+    : Math.min(dedupeMs, NO_TURN_DEDUPE_MS)
+  if (shouldSkipNotification(detailKey, detailDedupeMs)) return
+
+  const crossSourceKey = `${workspaceId}:${reason}:cross-source`
+  if (shouldSkipNotification(crossSourceKey, Math.min(dedupeMs, CROSS_SOURCE_DEDUPE_MS))) return
 
   let anyBackgroundWindow = false
   for (const win of BrowserWindow.getAllWindows()) {
