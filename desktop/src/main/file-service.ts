@@ -72,7 +72,7 @@ export class FileService {
     const { stdout } = await execFileAsync(
       'git',
       ['ls-files', '--others', '--cached', '--exclude-standard'],
-      { cwd: dirPath }
+      { cwd: dirPath, windowsHide: true }
     )
 
     const files = stdout.trim().split('\n').filter(Boolean)

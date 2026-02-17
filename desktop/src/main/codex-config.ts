@@ -11,6 +11,10 @@ export interface CodexModelOption {
   label: string
 }
 
+const FORCE_VISIBLE_MODEL_SLUGS = new Set([
+  'gpt-5.3-codex-spark',
+])
+
 export async function loadCodexConfigText(): Promise<string> {
   try {
     return await readFile(CODEX_CONFIG_PATH, 'utf-8')
@@ -44,7 +48,8 @@ export async function loadCodexModelOptions(): Promise<CodexModelOption[]> {
 
         const visibility = typeof model.visibility === 'string' ? model.visibility : 'hide'
         const supportedInApi = model.supported_in_api !== false
-        if (visibility !== 'list' || !supportedInApi) return null
+        const forceVisible = FORCE_VISIBLE_MODEL_SLUGS.has(value)
+        if (visibility !== 'list' || (!supportedInApi && !forceVisible)) return null
 
         const label = typeof model.display_name === 'string' && model.display_name.trim()
           ? model.display_name

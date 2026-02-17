@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Button,
   Dialog,
@@ -15,6 +15,13 @@ import {
   type AgentPermissionMode,
   type ChatMessage,
 } from '../../store/types'
+import {
+  consumeQueuedPromptInserts,
+  dispatchPromptInsertForThread,
+  queuePromptInsertForThread,
+} from '../../utils/template-routing'
+import type { ChatEventData, ChatThreadItemData } from '../../../shared/ipc-channels'
+import { mapChatEventToMessage } from './chat-event-mapper'
 import styles from './ChatPanel.module.css'
 
 interface ChatPanelProps {
@@ -29,8 +36,10 @@ type DropdownOption = { value: string; label: string }
 type SessionMode = 'chat' | 'plan'
 type BranchScope = 'local' | 'origin'
 
+const SPARK_MODEL_OPTION: DropdownOption = { value: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark' }
 const FALLBACK_MODEL_OPTIONS: DropdownOption[] = [
   { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
+  SPARK_MODEL_OPTION,
   { value: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
   { value: 'gpt-5.1-codex-max', label: 'gpt-5.1-codex-max' },
   { value: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini' },
@@ -69,9 +78,183 @@ interface ParsedInteractiveQuestion {
   footer?: string
 }
 
+const PLAN_ACTION_EXECUTE_ID = 'plan-execute-now'
+const PLAN_ACTION_REFINE_ID = 'plan-refine'
+const PLAN_ACTION_EXECUTE_LABEL = 'Start implementation now'
+const PLAN_ACTION_REFINE_LABEL = 'Keep planning'
+const PLAN_EXECUTE_PROMPT = 'Implement the approved plan now. Start with phase 1 and apply changes directly.'
+const PLAN_REFINE_PROMPT = 'Keep planning. Refine the implementation plan with concrete steps, risks, and validation for each phase.'
+const DEFAULT_QUESTION_FOOTER = 'Select an option, then press Enter to submit your answer.'
+const PLAN_COMPLETION_QUESTION: ParsedInteractiveQuestion = {
+  header: 'Plan complete',
+  prompt: 'The plan is ready. What should I do next?',
+  options: [
+    {
+      id: PLAN_ACTION_EXECUTE_ID,
+      index: 1,
+      label: PLAN_ACTION_EXECUTE_LABEL,
+      detail: 'Exit plan mode and execute changes now',
+    },
+    {
+      id: PLAN_ACTION_REFINE_ID,
+      index: 2,
+      label: PLAN_ACTION_REFINE_LABEL,
+      detail: 'Stay in plan mode and keep refining',
+    },
+  ],
+  footer: 'Pick one option to continue.',
+}
+
 const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
 const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
+const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
+const INTERRUPT_THREAD_EVENT = 'chat:interrupt-thread'
+
+interface BranchExecutionLock {
+  key: string
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+  acquiredAt: number
+  heartbeatAt: number
+  expiresAt: number
+}
+
+interface BranchExecutionConflict {
+  key: string
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+  workspaceName?: string
+  threadTitle?: string
+}
+
+interface PendingSendPayload {
+  text: string
+  mode: SessionMode
+  images: AttachedImage[]
+}
+
+interface InterruptThreadEventDetail {
+  threadId: string
+  reason?: string
+}
+
+const branchExecutionLocksByKey = new Map<string, BranchExecutionLock>()
+
+function toBranchLockKey(projectId: string, branch: string): string {
+  return `${projectId}:${normalizeBranchName(branch).toLowerCase()}`
+}
+
+function pruneExpiredBranchLocks(now = Date.now()): void {
+  for (const [key, lock] of branchExecutionLocksByKey.entries()) {
+    if (lock.expiresAt <= now) {
+      branchExecutionLocksByKey.delete(key)
+    }
+  }
+}
+
+function acquireBranchExecutionLock(options: {
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+}): { acquired: true; key: string } | { acquired: false; conflict: BranchExecutionConflict } {
+  pruneExpiredBranchLocks()
+
+  const now = Date.now()
+  const normalizedBranch = normalizeBranchName(options.branch)
+  const key = toBranchLockKey(options.projectId, normalizedBranch)
+  const existing = branchExecutionLocksByKey.get(key)
+
+  if (existing && existing.threadId !== options.threadId) {
+    return {
+      acquired: false,
+      conflict: {
+        key,
+        projectId: existing.projectId,
+        branch: existing.branch,
+        workspaceId: existing.workspaceId,
+        threadId: existing.threadId,
+        status: existing.status,
+      },
+    }
+  }
+
+  const acquiredAt = existing?.acquiredAt ?? now
+  branchExecutionLocksByKey.set(key, {
+    key,
+    projectId: options.projectId,
+    branch: normalizedBranch,
+    workspaceId: options.workspaceId,
+    threadId: options.threadId,
+    status: options.status,
+    acquiredAt,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+
+  return { acquired: true, key }
+}
+
+function forceTakeBranchExecutionLock(options: {
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+}): string {
+  pruneExpiredBranchLocks()
+  const now = Date.now()
+  const normalizedBranch = normalizeBranchName(options.branch)
+  const key = toBranchLockKey(options.projectId, normalizedBranch)
+  branchExecutionLocksByKey.set(key, {
+    key,
+    projectId: options.projectId,
+    branch: normalizedBranch,
+    workspaceId: options.workspaceId,
+    threadId: options.threadId,
+    status: options.status,
+    acquiredAt: now,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+  return key
+}
+
+function touchBranchExecutionLock(key: string, threadId: string, status: 'running' | 'waiting'): void {
+  pruneExpiredBranchLocks()
+  const lock = branchExecutionLocksByKey.get(key)
+  if (!lock || lock.threadId !== threadId) return
+  const now = Date.now()
+  branchExecutionLocksByKey.set(key, {
+    ...lock,
+    status,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+}
+
+function releaseBranchExecutionLock(key: string, threadId: string): void {
+  const lock = branchExecutionLocksByKey.get(key)
+  if (!lock || lock.threadId !== threadId) return
+  branchExecutionLocksByKey.delete(key)
+}
+
+function normalizeBranchSlug(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
 
 function normalizeBranchName(input: string): string {
   return input.trim().replace(/^origin\//, '').replace(/^refs\/heads\//, '')
@@ -113,36 +296,124 @@ function formatUserError(err: unknown, fallback: string): string {
   return err.message.replace(invokePrefix, '') || fallback
 }
 
-function getInteractiveQuestion(payload: Record<string, unknown>): string | null {
-  const pickText = (...keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = payload[key]
-      if (typeof value === 'string' && value.trim()) return value.trim()
-    }
-    return null
+function pickTrimmedText(payload: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
   }
+  return null
+}
 
-  const prompt = pickText('question', 'prompt', 'text')
+function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
+  const lines: string[] = []
+  if (question.header) lines.push(question.header)
+  lines.push(question.prompt)
+  lines.push('')
+  for (const option of question.options) {
+    lines.push(option.detail
+      ? `${option.index}. ${option.label} - ${option.detail}`
+      : `${option.index}. ${option.label}`)
+  }
+  if (question.footer) {
+    lines.push('')
+    lines.push(question.footer)
+  }
+  return lines.join('\n')
+}
+
+function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
+  const prompt = pickTrimmedText(payload, 'question', 'prompt', 'text')
   if (!prompt) return null
 
-  const optionsRaw = payload.options
-  if (!Array.isArray(optionsRaw) || optionsRaw.length === 0) return prompt
+  const optionsRaw = Array.isArray(payload.options)
+    ? payload.options
+    : Array.isArray(payload.choices)
+      ? payload.choices
+      : null
+  if (!optionsRaw || optionsRaw.length === 0) return null
 
-  const optionLines = optionsRaw
-    .map((option, index) => {
-      if (!option || typeof option !== 'object') return `${index + 1}. Option ${index + 1}`
-      const entry = option as Record<string, unknown>
-      const label = typeof entry.label === 'string' && entry.label.trim()
-        ? entry.label.trim()
-        : `Option ${index + 1}`
-      const description = typeof entry.description === 'string' && entry.description.trim()
-        ? entry.description.trim()
-        : ''
-      return description ? `${index + 1}. ${label} - ${description}` : `${index + 1}. ${label}`
+  const options: ParsedQuestionOption[] = []
+  for (let i = 0; i < optionsRaw.length; i += 1) {
+    const option = optionsRaw[i]
+    if (typeof option === 'string' && option.trim()) {
+      const label = option.trim()
+      options.push({ id: `opt-${i + 1}-${label}`, index: i + 1, label })
+      continue
+    }
+    if (!option || typeof option !== 'object') continue
+    const entry = option as Record<string, unknown>
+    const label = pickTrimmedText(entry, 'label', 'value', 'name')
+    if (!label) continue
+    const detail = pickTrimmedText(entry, 'description', 'detail')
+    const id = pickTrimmedText(entry, 'id')
+      ?? `opt-${i + 1}-${label}`
+    options.push({
+      id,
+      index: i + 1,
+      label,
+      detail: detail ?? undefined,
     })
-    .join('\n')
+  }
 
-  return `${prompt}\n\n${optionLines}`
+  if (options.length === 0) return null
+
+  return {
+    header: pickTrimmedText(payload, 'header', 'title') ?? undefined,
+    prompt,
+    options,
+    footer: pickTrimmedText(payload, 'footer', 'hint') ?? undefined,
+  }
+}
+
+function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | undefined): ParsedInteractiveQuestion | null {
+  if (!metadata) return null
+  const raw = metadata.interactiveQuestion
+  if (!raw || typeof raw !== 'object') return null
+
+  const payload = raw as Record<string, unknown>
+  const prompt = pickTrimmedText(payload, 'prompt')
+  const optionsRaw = payload.options
+  if (!prompt || !Array.isArray(optionsRaw) || optionsRaw.length === 0) return null
+
+  const options: ParsedQuestionOption[] = []
+  for (let i = 0; i < optionsRaw.length; i += 1) {
+    const option = optionsRaw[i]
+    if (!option || typeof option !== 'object') continue
+    const entry = option as Record<string, unknown>
+    const label = pickTrimmedText(entry, 'label')
+    const id = pickTrimmedText(entry, 'id')
+    const rawIndex = entry.index
+    const parsedIndex = typeof rawIndex === 'number'
+      ? rawIndex
+      : typeof rawIndex === 'string'
+        ? Number.parseInt(rawIndex, 10)
+        : Number.NaN
+    if (!label || !id) continue
+    options.push({
+      id,
+      label,
+      index: Number.isFinite(parsedIndex) ? parsedIndex : i + 1,
+      detail: pickTrimmedText(entry, 'detail') ?? undefined,
+    })
+  }
+
+  if (options.length === 0) return null
+
+  return {
+    header: pickTrimmedText(payload, 'header') ?? undefined,
+    prompt,
+    options,
+    footer: pickTrimmedText(payload, 'footer') ?? undefined,
+  }
+}
+
+function isThreadItemData(data: ChatEventData): data is ChatThreadItemData {
+  return 'id' in data && typeof data.id === 'string'
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
 }
 
 function looksInteractiveQuestionText(content: string): boolean {
@@ -226,6 +497,14 @@ function parseInteractiveQuestionText(content: string): ParsedInteractiveQuestio
     options,
     footer: footerLines.length > 0 ? footerLines.join(' | ') : undefined,
   }
+}
+
+function mergeModelOptionsWithRequired(options: DropdownOption[]): DropdownOption[] {
+  const merged = [...options]
+  if (!merged.some((option) => option.value === SPARK_MODEL_OPTION.value)) {
+    merged.push(SPARK_MODEL_OPTION)
+  }
+  return merged
 }
 
 function ToolbarDropdown({
@@ -367,10 +646,6 @@ interface AttachedImage {
   previewUrl: string
 }
 
-type ChatRenderItem =
-  | { kind: 'message'; message: ChatMessage }
-  | { kind: 'tool-calls'; key: string; messages: ChatMessage[] }
-
 function formatMessageTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], {
     hour: 'numeric',
@@ -380,41 +655,345 @@ function formatMessageTime(timestamp: number): string {
   })
 }
 
-function isToolCallMessage(message: ChatMessage): boolean {
-  return message.type === 'command' || message.type === 'file-change' || message.type === 'tool-call'
+interface MarkdownTextBlock {
+  kind: 'text'
+  text: string
 }
 
-function getToolCallText(message: ChatMessage): string {
-  if (message.type === 'tool-call') {
-    const toolName = (message.metadata?.tool_name as string | undefined)?.trim()
-    const server = (message.metadata?.server as string | undefined)?.trim()
-    const tool = (message.metadata?.tool as string | undefined)?.trim()
-    const query = (message.metadata?.query as string | undefined)?.trim()
-    const status = (message.metadata?.status as string | undefined)?.trim()
+interface MarkdownCodeBlock {
+  kind: 'code'
+  lang: string
+  code: string
+}
 
-    if (server && tool) return `Tool call ${server}.${tool}${status ? ` (${status})` : ''}`
-    if (query) return `Web search "${query}"`
-    if (toolName) return `Tool call ${toolName}${status ? ` (${status})` : ''}`
-    return 'Tool call'
+type MarkdownBlock = MarkdownTextBlock | MarkdownCodeBlock
+
+function parseMarkdownBlocks(content: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = []
+  const fenceRe = /```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g
+  let cursor = 0
+
+  for (const match of content.matchAll(fenceRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      const text = content.slice(cursor, start)
+      if (text.trim().length > 0) blocks.push({ kind: 'text', text })
+    }
+
+    blocks.push({
+      kind: 'code',
+      lang: (match[1] ?? '').trim(),
+      code: (match[2] ?? '').replace(/\n$/, ''),
+    })
+    cursor = end
   }
 
-  if (message.type === 'command') {
-    const toolName = (message.metadata?.tool_name as string | undefined)?.trim()
-    const command = (message.metadata?.command as string) ?? message.content
-    const trimmed = command.trim()
-    if (trimmed) return `Command run ${trimmed}`
-    if (toolName) return `Tool call ${toolName}`
-    return 'Tool call'
+  if (cursor < content.length) {
+    const text = content.slice(cursor)
+    if (text.trim().length > 0) blocks.push({ kind: 'text', text })
   }
 
-  if (message.type === 'file-change') {
-    const changes = (message.metadata?.changes as Array<{ path: string; kind: string }>) ?? []
-    return changes.length > 0
-      ? `File changes (${changes.length})`
-      : 'File changes'
+  if (blocks.length === 0) return [{ kind: 'text', text: content }]
+  return blocks
+}
+
+function renderBoldSegments(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const boldRe = /\*\*([^*]+)\*\*/g
+  let cursor = 0
+  let index = 0
+
+  for (const match of text.matchAll(boldRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      nodes.push(
+        <span key={`${keyPrefix}-plain-${index}`}>{text.slice(cursor, start)}</span>,
+      )
+      index += 1
+    }
+
+    nodes.push(
+      <strong key={`${keyPrefix}-bold-${index}`} className={styles.markdownStrong}>
+        {match[1]}
+      </strong>,
+    )
+    index += 1
+    cursor = end
   }
 
-  return message.content || 'Tool call'
+  if (cursor < text.length) {
+    nodes.push(
+      <span key={`${keyPrefix}-tail-${index}`}>{text.slice(cursor)}</span>,
+    )
+  }
+
+  return nodes
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const codeRe = /`([^`\n]+)`/g
+  let cursor = 0
+  let index = 0
+
+  for (const match of text.matchAll(codeRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      nodes.push(...renderBoldSegments(text.slice(cursor, start), `${keyPrefix}-seg-${index}`))
+      index += 1
+    }
+
+    nodes.push(
+      <code key={`${keyPrefix}-code-${index}`} className={styles.markdownInlineCode}>
+        {match[1]}
+      </code>,
+    )
+    index += 1
+    cursor = end
+  }
+
+  if (cursor < text.length) {
+    nodes.push(...renderBoldSegments(text.slice(cursor), `${keyPrefix}-tail-${index}`))
+  }
+
+  return nodes
+}
+
+function renderTextParagraph(paragraph: string, key: string): ReactNode {
+  const lines = paragraph
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (lines.length > 0 && lines.every((line) => /^[-*]\s+/.test(line))) {
+    return (
+      <ul key={key} className={styles.markdownList}>
+        {lines.map((line, idx) => (
+          <li key={`${key}-li-${idx}`}>{renderInlineMarkdown(line.replace(/^[-*]\s+/, ''), `${key}-li-${idx}`)}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  if (lines.length > 0 && lines.every((line) => /^\d+\.\s+/.test(line))) {
+    return (
+      <ol key={key} className={styles.markdownList}>
+        {lines.map((line, idx) => (
+          <li key={`${key}-li-${idx}`}>{renderInlineMarkdown(line.replace(/^\d+\.\s+/, ''), `${key}-li-${idx}`)}</li>
+        ))}
+      </ol>
+    )
+  }
+
+  return (
+    <p key={key} className={styles.markdownParagraph}>
+      {renderInlineMarkdown(paragraph, key)}
+    </p>
+  )
+}
+
+function renderAssistantMarkdown(content: string): ReactNode {
+  const blocks = parseMarkdownBlocks(content)
+
+  return (
+    <div className={styles.markdownRoot}>
+      {blocks.map((block, blockIndex) => {
+        if (block.kind === 'code') {
+          return (
+            <div key={`code-${blockIndex}`} className={styles.markdownCodeWrapper}>
+              {block.lang && <div className={styles.markdownCodeLang}>{block.lang}</div>}
+              <pre className={styles.markdownCodeBlock}>
+                <code>{block.code}</code>
+              </pre>
+            </div>
+          )
+        }
+
+        return block.text
+          .split(/\n{2,}/)
+          .map((paragraph, paragraphIndex) =>
+            renderTextParagraph(paragraph, `text-${blockIndex}-${paragraphIndex}`),
+          )
+      })}
+    </div>
+  )
+}
+
+function formatStatusLabel(status: unknown): string {
+  if (status === 'completed') return 'Completed'
+  if (status === 'failed') return 'Failed'
+  if (status === 'in_progress') return 'Running'
+  return 'Pending'
+}
+
+function formatStatusClassName(status: unknown): string {
+  if (status === 'completed') return styles.exitCodeSuccess
+  if (status === 'failed') return styles.exitCodeFail
+  return ''
+}
+
+function stringifyJsonSafe(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return '[unserializable]'
+  }
+}
+
+function DetailSection({ label, value }: { label: string; value: unknown }) {
+  if (value == null) return null
+  const text = typeof value === 'string' ? value : stringifyJsonSafe(value)
+  if (!text.trim()) return null
+  return (
+    <details className={styles.toolDetailBlock}>
+      <summary className={styles.toolDetailSummary}>{label}</summary>
+      <pre className={styles.commandOutput}>{text}</pre>
+    </details>
+  )
+}
+
+function CommandCard({ message }: { message: ChatMessage }) {
+  const command = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
+  const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
+  const status = message.metadata?.status
+  const exitCode = message.metadata?.exit_code
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.commandBlock}>
+        <div className={styles.commandHeader}>
+          <span className={styles.commandLabel}>Command</span>
+          <span className={styles.commandText}>{command}</span>
+          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
+          {typeof exitCode === 'number' && (
+            <span className={`${styles.exitCode} ${exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
+              exit {exitCode}
+            </span>
+          )}
+        </div>
+        {output.trim() && (
+          <details className={styles.toolDetailBlock}>
+            <summary className={styles.toolDetailSummary}>Output</summary>
+            <pre className={styles.commandOutput}>{output}</pre>
+          </details>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
+
+function FileChangeCard({ message }: { message: ChatMessage }) {
+  const changes = (message.metadata?.changes as Array<{ path: string; kind: string }> | undefined) ?? []
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.fileChangeBlock}>
+        <div className={styles.fileChangeHeader}>File changes ({changes.length})</div>
+        {changes.length > 0 ? (
+          <div className={styles.fileChangeList}>
+            {changes.map((change) => (
+              <div key={`${change.kind}:${change.path}`} className={styles.fileChangeItem}>
+                <span className={`${styles.fileChangeKind} ${
+                  change.kind === 'add'
+                    ? styles.fileChangeAdd
+                    : change.kind === 'delete'
+                      ? styles.fileChangeDelete
+                      : styles.fileChangeUpdate
+                }`}
+                >
+                  {change.kind}
+                </span>
+                <span>{change.path}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className={styles.reasoningContent}>No file changes reported.</div>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
+
+function ToolCallCard({ message }: { message: ChatMessage }) {
+  const toolName = (message.metadata?.tool_name as string | undefined)?.trim() || 'tool-call'
+  const status = message.metadata?.status
+  const server = (message.metadata?.server as string | undefined)?.trim()
+  const tool = (message.metadata?.tool as string | undefined)?.trim()
+  const query = (message.metadata?.query as string | undefined)?.trim()
+  const itemCount = typeof message.metadata?.item_count === 'number' ? message.metadata.item_count : undefined
+  const completedCount = typeof message.metadata?.completed_count === 'number' ? message.metadata.completed_count : undefined
+  const title = server && tool ? `${server}.${tool}` : toolName
+  const subtitle = query
+    ? `Query: ${query}`
+    : typeof itemCount === 'number'
+      ? `Tasks: ${completedCount ?? 0}/${itemCount}`
+      : ''
+
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.toolCallCard}>
+        <div className={styles.toolCallHeader}>
+          <span className={styles.commandLabel}>Tool</span>
+          <span className={styles.commandText}>{title}</span>
+          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
+        </div>
+        {subtitle && <div className={styles.toolCallSubtitle}>{subtitle}</div>}
+        <DetailSection label="Arguments" value={message.metadata?.arguments} />
+        <DetailSection label="Result" value={message.metadata?.result} />
+        <DetailSection label="Items" value={message.metadata?.items} />
+        <DetailSection label="Raw payload" value={message.metadata?.raw} />
+        <DetailSection label="Error" value={message.metadata?.error} />
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
+
+function formatLifecycleLabel(lifecycle: unknown): string {
+  if (lifecycle === 'turn.waiting_input') return 'Waiting for input'
+  if (lifecycle === 'turn.completed') return 'Completed'
+  if (lifecycle === 'turn.cancelled') return 'Cancelled'
+  if (lifecycle === 'turn.failed') return 'Failed'
+  if (lifecycle === 'error') return 'Error'
+  return 'Update'
+}
+
+function formatLifecycleClassName(lifecycle: unknown): string {
+  if (lifecycle === 'turn.completed') return styles.lifecycleSuccess
+  if (lifecycle === 'turn.waiting_input') return styles.lifecycleWaiting
+  if (lifecycle === 'turn.cancelled') return styles.lifecycleMuted
+  return ''
+}
+
+function LifecycleCard({ message }: { message: ChatMessage }) {
+  const lifecycle = message.metadata?.lifecycle
+  const usage = message.metadata?.usage as
+    | { input_tokens: number; cached_input_tokens: number; output_tokens: number }
+    | undefined
+
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={`${styles.lifecycleCard} ${formatLifecycleClassName(lifecycle)}`}>
+        <div className={styles.lifecycleHeader}>{formatLifecycleLabel(lifecycle)}</div>
+        <div className={styles.lifecycleText}>{message.content}</div>
+        {usage && (
+          <div className={styles.lifecycleUsage}>
+            <span>in {usage.input_tokens}</span>
+            <span>cached {usage.cached_input_tokens}</span>
+            <span>out {usage.output_tokens}</span>
+          </div>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
 }
 
 function QuestionCard({
@@ -424,7 +1003,7 @@ function QuestionCard({
 }: {
   question: ParsedInteractiveQuestion
   timestamp: number
-  onSelect: (answer: string) => void
+  onSelect: (answer: string, optionId: string) => void
 }) {
   return (
     <div className={`${styles.message} ${styles.messageAssistant}`}>
@@ -437,7 +1016,7 @@ function QuestionCard({
               key={option.id}
               type="button"
               className={styles.questionOption}
-              onClick={() => onSelect(option.label)}
+              onClick={() => onSelect(option.label, option.id)}
             >
               <span className={styles.questionOptionIndex}>{option.index}.</span>
               <span className={styles.questionOptionBody}>
@@ -448,7 +1027,7 @@ function QuestionCard({
           ))}
         </div>
         <div className={styles.questionFooter}>
-          {question.footer ?? 'Select an option, then press Enter to submit your answer.'}
+          {question.footer ?? DEFAULT_QUESTION_FOOTER}
         </div>
       </div>
       <div className={styles.messageTime}>{formatMessageTime(timestamp)}</div>
@@ -461,7 +1040,7 @@ function MessageBubble({
   onQuestionOptionSelect,
 }: {
   message: ChatMessage
-  onQuestionOptionSelect: (answer: string) => void
+  onQuestionOptionSelect: (answer: string, optionId: string) => void
 }) {
   const [reasoningOpen, setReasoningOpen] = useState(false)
 
@@ -487,11 +1066,27 @@ function MessageBubble({
     )
   }
 
+  if (message.role === 'system' && message.metadata?.lifecycle && !message.metadata?.error) {
+    return <LifecycleCard message={message} />
+  }
+
   // Error messages
   if (message.role === 'system' && message.metadata?.error) {
     return (
       <div className={styles.errorBubble}>{message.content}</div>
     )
+  }
+
+  if (message.type === 'command') {
+    return <CommandCard message={message} />
+  }
+
+  if (message.type === 'file-change') {
+    return <FileChangeCard message={message} />
+  }
+
+  if (message.type === 'tool-call') {
+    return <ToolCallCard message={message} />
   }
 
   // Regular text messages
@@ -503,7 +1098,7 @@ function MessageBubble({
   if (!isUser && !content) return null
 
   if (message.role === 'assistant' && message.type === 'text') {
-    const parsedQuestion = parseInteractiveQuestionText(content)
+    const parsedQuestion = parseInteractiveQuestionMetadata(message.metadata) ?? parseInteractiveQuestionText(content)
     if (parsedQuestion) {
       return (
         <QuestionCard
@@ -520,32 +1115,11 @@ function MessageBubble({
       {isUser ? (
         <div className={`${styles.bubble} ${styles.bubbleUser}`}>{message.content}</div>
       ) : (
-        <div className={styles.assistantText}>{message.content}</div>
+        <div className={styles.assistantText}>{renderAssistantMarkdown(message.content)}</div>
       )}
       {message.role === 'assistant' && (
         <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
       )}
-    </div>
-  )
-}
-
-function ToolCallsBlock({ messages }: { messages: ChatMessage[] }) {
-  return (
-    <div className={`${styles.message} ${styles.messageAssistant}`}>
-      <div className={styles.toolCallsBlock}>
-        <div className={styles.toolCallsHeader}>Tool calls ({messages.length})</div>
-        <div className={styles.toolCallsList}>
-          {messages.map((message) => (
-            <div key={message.id} className={styles.toolCallsItem}>
-              <span className={styles.toolCallsBullet}>*</span>
-              <span className={styles.toolCallsText}>{getToolCallText(message)}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className={styles.messageTime}>
-        {formatMessageTime(messages[messages.length - 1]!.timestamp)}
-      </div>
     </div>
   )
 }
@@ -570,7 +1144,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const setActiveWorkspace = useAppStore((s) => s.setActiveWorkspace)
   const setLastSelectedBranch = useAppStore((s) => s.setLastSelectedBranch)
   const createChatForActiveWorkspace = useAppStore((s) => s.createChatForActiveWorkspace)
-  const setWorkspaceAgentStatus = useAppStore((s) => s.setWorkspaceAgentStatus)
+  const setChatThreadAgentStatus = useAppStore((s) => s.setChatThreadAgentStatus)
   const addWorkspace = useAppStore((s) => s.addWorkspace)
   const addToast = useAppStore((s) => s.addToast)
   const projects = useAppStore((s) => s.projects)
@@ -593,6 +1167,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [createBranchName, setCreateBranchName] = useState('')
   const [createBranchBase, setCreateBranchBase] = useState('main')
   const [creatingBranch, setCreatingBranch] = useState(false)
+  const [branchConflict, setBranchConflict] = useState<BranchExecutionConflict | null>(null)
+  const [pendingSendPayload, setPendingSendPayload] = useState<PendingSendPayload | null>(null)
+  const [resolvingBranchConflict, setResolvingBranchConflict] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -604,40 +1181,289 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   // Guard against SDK item-id reuse across turns. We scope all item ids by turn.
   const eventTurnSequenceRef = useRef(0)
   const activeTurnHasItemsRef = useRef(false)
+  const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
+  const branchLockKeyRef = useRef<string | null>(null)
 
-  const renderItems = useMemo<ChatRenderItem[]>(() => {
-    if (messages.length === 0) return []
-
-    const items: ChatRenderItem[] = []
-    let currentToolMessages: ChatMessage[] = []
-
-    for (const message of messages) {
-      if (isToolCallMessage(message)) {
-        currentToolMessages.push(message)
-        continue
+  useEffect(() => {
+    const appendPrompt = (prompt: string) => {
+      setInput((prev) => (prev.trim().length > 0 ? `${prev}\n\n${prompt}` : prompt))
+      if (textareaRef.current) {
+        textareaRef.current.focus()
+        textareaRef.current.style.height = 'auto'
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`
       }
-
-      if (currentToolMessages.length > 0) {
-        const key = currentToolMessages.map((m) => m.id).join(':')
-        items.push({ kind: 'tool-calls', key, messages: currentToolMessages })
-        currentToolMessages = []
-      }
-
-      items.push({ kind: 'message', message })
     }
 
-    if (currentToolMessages.length > 0) {
-      const key = currentToolMessages.map((m) => m.id).join(':')
-      items.push({ kind: 'tool-calls', key, messages: currentToolMessages })
+    const pendingPrompts = consumeQueuedPromptInserts(threadId)
+    if (pendingPrompts.length > 0) {
+      appendPrompt(pendingPrompts.join('\n\n'))
     }
 
-    return items
-  }, [messages])
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string; prompt?: string }>).detail
+      if (!detail || detail.threadId !== threadId || typeof detail.prompt !== 'string') return
+
+      appendPrompt(detail.prompt)
+    }
+
+    window.addEventListener('chat:insertPrompt', handler)
+    return () => {
+      window.removeEventListener('chat:insertPrompt', handler)
+    }
+  }, [threadId])
 
   const activeProject = useMemo(
     () => (workspace ? projects.find((project) => project.id === workspace.projectId) : undefined),
     [workspace, projects],
   )
+
+  const currentBranchLockKey = useMemo(() => {
+    if (!activeProject || !workspace?.branch) return null
+    return toBranchLockKey(activeProject.id, workspace.branch)
+  }, [activeProject, workspace?.branch])
+
+  const enrichBranchConflict = useCallback((conflict: BranchExecutionConflict): BranchExecutionConflict => {
+    const state = useAppStore.getState()
+    const workspaceName = state.workspaces.find((entry) => entry.id === conflict.workspaceId)?.name
+    const threadTitle = state.tabs.find(
+      (entry) => entry.type === 'chat' && entry.threadId === conflict.threadId,
+    )
+    return {
+      ...conflict,
+      workspaceName,
+      threadTitle: threadTitle?.type === 'chat' ? threadTitle.title : undefined,
+    }
+  }, [])
+
+  const findStatusConflictForCurrentBranch = useCallback((): BranchExecutionConflict | null => {
+    if (!activeProject || !workspace) return null
+    const normalizedBranch = normalizeBranchName(workspace.branch)
+    if (!normalizedBranch) return null
+
+    const state = useAppStore.getState()
+    for (const [candidateThreadId, candidate] of Object.entries(state._chatThreadStatusById)) {
+      if (candidateThreadId === threadId) continue
+      if (candidate.status !== 'running' && candidate.status !== 'waiting') continue
+
+      const candidateWorkspace = state.workspaces.find((entry) => entry.id === candidate.workspaceId)
+      if (!candidateWorkspace || candidateWorkspace.projectId !== activeProject.id) continue
+      if (normalizeBranchName(candidateWorkspace.branch) !== normalizedBranch) continue
+
+      return enrichBranchConflict({
+        key: toBranchLockKey(activeProject.id, normalizedBranch),
+        projectId: activeProject.id,
+        branch: normalizedBranch,
+        workspaceId: candidate.workspaceId,
+        threadId: candidateThreadId,
+        status: candidate.status,
+      })
+    }
+    return null
+  }, [activeProject, workspace, threadId, enrichBranchConflict])
+
+  const updateThreadStatusAndLock = useCallback((status: 'running' | 'waiting' | 'idle' | 'completed') => {
+    if (workspaceId) {
+      setChatThreadAgentStatus(workspaceId, threadId, status)
+    }
+
+    const key = branchLockKeyRef.current
+    if (!key) return
+
+    if (status === 'running' || status === 'waiting') {
+      touchBranchExecutionLock(key, threadId, status)
+    } else {
+      releaseBranchExecutionLock(key, threadId)
+      branchLockKeyRef.current = null
+    }
+  }, [workspaceId, threadId, setChatThreadAgentStatus])
+
+  const releaseOwnedBranchLock = useCallback(() => {
+    const key = branchLockKeyRef.current
+    if (!key) return
+    releaseBranchExecutionLock(key, threadId)
+    branchLockKeyRef.current = null
+  }, [threadId])
+
+  const resolveBranchWorkspace = useCallback(async (
+    targetBranch: string,
+    options: {
+      createNewBranch: boolean
+      baseBranch?: string
+      errorFallbackMessage: string
+    },
+  ) => {
+    if (!activeProject) return null
+
+    const normalizedTargetBranch = normalizeBranchName(targetBranch)
+    if (!normalizedTargetBranch) return null
+
+    let targetWorkspace = workspaces.find(
+      (entry) =>
+        entry.projectId === activeProject.id &&
+        normalizeBranchName(entry.branch) === normalizedTargetBranch,
+    )
+    if (targetWorkspace) return targetWorkspace
+
+    const workspaceName = uniqueWorkspaceName(
+      toWorkspaceNameFromBranch(normalizedTargetBranch),
+      activeProject.id,
+      workspaces,
+    )
+
+    try {
+      const worktreePath = await window.api.git.createWorktree(
+        activeProject.repoPath,
+        workspaceName,
+        normalizedTargetBranch,
+        options.createNewBranch,
+        options.createNewBranch
+          ? normalizeBranchName(options.baseBranch ?? workspace?.branch ?? '') || 'main'
+          : undefined,
+      )
+
+      targetWorkspace = {
+        id: crypto.randomUUID(),
+        name: workspaceName,
+        type: DEFAULT_WORKSPACE_TYPE,
+        branch: normalizedTargetBranch,
+        worktreePath,
+        projectId: activeProject.id,
+        agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+        memory: '',
+      }
+      addWorkspace(targetWorkspace)
+      return targetWorkspace
+    } catch (err) {
+      const message = formatUserError(err, options.errorFallbackMessage)
+
+      if (message === 'BRANCH_CHECKED_OUT') {
+        try {
+          const listed = await window.api.git.listWorktrees(activeProject.repoPath)
+          const matchingWorktree = listed.find(
+            (entry) =>
+              normalizeBranchName(entry.branch) === normalizedTargetBranch &&
+              entry.path,
+          )
+
+          if (matchingWorktree) {
+            const existingByPath = workspaces.find(
+              (entry) =>
+                entry.projectId === activeProject.id &&
+                entry.worktreePath.toLowerCase() === matchingWorktree.path.toLowerCase(),
+            )
+
+            if (existingByPath) {
+              if (normalizeBranchName(existingByPath.branch) !== normalizedTargetBranch) {
+                updateWorkspaceBranch(existingByPath.id, normalizedTargetBranch)
+              }
+              return existingByPath
+            }
+
+            targetWorkspace = {
+              id: crypto.randomUUID(),
+              name: workspaceName,
+              type: DEFAULT_WORKSPACE_TYPE,
+              branch: normalizedTargetBranch,
+              worktreePath: matchingWorktree.path,
+              projectId: activeProject.id,
+              agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+              memory: '',
+            }
+            addWorkspace(targetWorkspace)
+            return targetWorkspace
+          }
+        } catch {
+          // Keep default error path when worktree recovery fails.
+        }
+      }
+
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+      return null
+    }
+  }, [
+    activeProject,
+    workspace?.branch,
+    workspaces,
+    addWorkspace,
+    addToast,
+    updateWorkspaceBranch,
+  ])
+
+  const activateWorkspaceChat = useCallback(async (targetWorkspaceId: string) => {
+    setActiveWorkspace(targetWorkspaceId)
+    if (activeProject) {
+      const targetWorkspace = useAppStore.getState().workspaces.find((entry) => entry.id === targetWorkspaceId)
+      if (targetWorkspace) {
+        setLastSelectedBranch(activeProject.id, normalizeBranchName(targetWorkspace.branch))
+      }
+    }
+
+    const latestBeforeCreate = useAppStore.getState()
+    const hasChat = latestBeforeCreate.tabs.some(
+      (entry) => entry.workspaceId === targetWorkspaceId && entry.type === 'chat',
+    )
+    if (!hasChat) {
+      await createChatForActiveWorkspace()
+    }
+
+    const latest = useAppStore.getState()
+    const chatTabs = latest.tabs.filter(
+      (entry) => entry.workspaceId === targetWorkspaceId && entry.type === 'chat',
+    )
+    const activeChat = chatTabs.find((entry) => entry.id === latest.activeTabId)
+    const targetChat = activeChat ?? chatTabs[0]
+    if (targetChat?.type === 'chat') {
+      latest.setActiveTab(targetChat.id)
+      return targetChat
+    }
+    return null
+  }, [activeProject, setActiveWorkspace, setLastSelectedBranch, createChatForActiveWorkspace])
+
+  const suggestIsolatedBranchName = useCallback(async () => {
+    if (!activeProject || !workspace) return null
+    const baseBranch = normalizeBranchName(workspace.branch) || 'main'
+    const baseSlug = normalizeBranchSlug(baseBranch.split('/').pop() ?? baseBranch) || 'work'
+    const prefix = `thread/${baseSlug}-${threadId.slice(0, 6).toLowerCase()}`
+
+    const existingBranches = new Set<string>()
+    for (const entry of workspaces) {
+      if (entry.projectId === activeProject.id) {
+        existingBranches.add(normalizeBranchName(entry.branch))
+      }
+    }
+
+    try {
+      const gitBranches = await window.api.git.getBranches(activeProject.repoPath)
+      for (const branch of gitBranches) {
+        existingBranches.add(normalizeBranchName(branch))
+      }
+    } catch {
+      // keep workspace-only fallback
+    }
+
+    if (!existingBranches.has(prefix)) return prefix
+    for (let index = 2; index < 500; index += 1) {
+      const candidate = `${prefix}-${index}`
+      if (!existingBranches.has(candidate)) return candidate
+    }
+    return `${prefix}-${Date.now().toString(36)}`
+  }, [activeProject, workspace, threadId, workspaces])
+
+  const routePendingPromptToThread = useCallback((targetThreadId: string, payload: PendingSendPayload | null) => {
+    if (!payload) return
+    const trimmed = payload.text.trim()
+    if (trimmed) {
+      queuePromptInsertForThread(targetThreadId, trimmed)
+      dispatchPromptInsertForThread(targetThreadId, trimmed)
+    }
+    if (payload.images.length > 0) {
+      addToast({
+        id: crypto.randomUUID(),
+        type: 'info',
+        message: 'Image attachments were kept in the original thread. Re-attach them in the new branch thread.',
+      })
+    }
+  }, [addToast])
 
   const branchContexts = useMemo(() => {
     if (!activeProject) return []
@@ -715,6 +1541,32 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [workspace?.branch])
 
   useEffect(() => {
+    const expectedKey = currentBranchLockKey
+    const currentKey = branchLockKeyRef.current
+    if (!currentKey) return
+    if (expectedKey && currentKey === expectedKey) return
+    releaseOwnedBranchLock()
+  }, [currentBranchLockKey, releaseOwnedBranchLock])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<InterruptThreadEventDetail>).detail
+      if (!detail || detail.threadId !== threadId) return
+      const realThreadId = realThreadIdRef.current
+      if (realThreadId) {
+        window.api.chat.cancel(realThreadId)
+      }
+      setLoading(false)
+      updateThreadStatusAndLock('idle')
+    }
+
+    window.addEventListener(INTERRUPT_THREAD_EVENT, handler)
+    return () => {
+      window.removeEventListener(INTERRUPT_THREAD_EVENT, handler)
+    }
+  }, [threadId, updateThreadStatusAndLock])
+
+  useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
@@ -743,11 +1595,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     listModels()
       .then((options) => {
         if (cancelled || options.length === 0) return
-        setModelOptions(options)
+        const mergedOptions = mergeModelOptionsWithRequired(options)
+        setModelOptions(mergedOptions)
         setModel((current) => (
-          options.some((option) => option.value === current)
+          mergedOptions.some((option) => option.value === current)
             ? current
-            : options[0]!.value
+            : mergedOptions[0]!.value
         ))
       })
       .catch((err) => {
@@ -768,7 +1621,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     realThreadIdRef.current = null
     eventTurnSequenceRef.current = 0
     activeTurnHasItemsRef.current = false
-  }, [])
+    updateThreadStatusAndLock('idle')
+  }, [updateThreadStatusAndLock])
 
   useEffect(() => {
     return () => {
@@ -776,8 +1630,10 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       if (previousThreadId) {
         void window.api.chat.destroyThread(previousThreadId).catch(() => {})
       }
+      updateThreadStatusAndLock('idle')
+      releaseOwnedBranchLock()
     }
-  }, [])
+  }, [updateThreadStatusAndLock, releaseOwnedBranchLock])
 
   const toScopedItemId = useCallback((rawId: unknown) => {
     const normalizedRawId = typeof rawId === 'string' && rawId.trim().length > 0
@@ -791,239 +1647,266 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     return `${eventTurnSequenceRef.current}:${normalizedRawId}`
   }, [])
 
-  const handleQuestionOptionSelect = useCallback((answer: string) => {
-    setInput(answer)
-    setLoading(false)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (!el) return
-      el.focus()
-      el.style.height = 'auto'
-      el.style.height = `${Math.min(el.scrollHeight, 120)}px`
-    })
+  const toLifecycleMessageId = useCallback((eventType: string, eventTurnId?: string) => {
+    const turnScope = typeof eventTurnId === 'string' && eventTurnId.trim().length > 0
+      ? eventTurnId.trim()
+      : String(eventTurnSequenceRef.current || 0)
+    return `lifecycle:${turnScope}:${eventType}`
   }, [])
+
+  const appendChatMessage = useCallback((message: ChatMessage) => {
+    useAppStore.setState((state) => {
+      const existing = state.chatMessages[threadId] ?? []
+      const idx = existing.findIndex((entry) => entry.id === message.id)
+      const updated = idx >= 0
+        ? existing.map((entry, index) => (index === idx ? message : entry))
+        : [...existing, message]
+
+      return {
+        chatMessages: {
+          ...state.chatMessages,
+          [threadId]: updated,
+        },
+      }
+    })
+  }, [threadId])
+
+  const appendPlanCompletionCard = useCallback((turnId?: string) => {
+    useAppStore.setState((state) => {
+      const existing = state.chatMessages[threadId] ?? []
+      const alreadyShown = existing.some((message) => (
+        message.role === 'assistant'
+        && message.type === 'text'
+        && message.metadata?.planCompletionCard === true
+        && (!turnId || message.metadata?.turnId === turnId)
+      ))
+      if (alreadyShown) return {}
+
+      const cardMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: toInteractiveQuestionText(PLAN_COMPLETION_QUESTION),
+        type: 'text',
+        timestamp: Date.now(),
+        metadata: {
+          interactiveQuestion: PLAN_COMPLETION_QUESTION,
+          planCompletionCard: true,
+          turnId: turnId ?? '',
+        },
+      }
+
+      return {
+        chatMessages: {
+          ...state.chatMessages,
+          [threadId]: [...existing, cardMessage],
+        },
+      }
+    })
+  }, [threadId])
+
+  const notifyInactiveChatTab = useCallback((reason: 'waiting_input' | 'completed') => {
+    if (!workspaceId) return
+
+    const state = useAppStore.getState()
+    if (state.activeWorkspaceId !== workspaceId) return
+
+    const tab = state.tabs.find(
+      (entry) => entry.type === 'chat' && entry.workspaceId === workspaceId && entry.threadId === threadId,
+    )
+    if (!tab || tab.id === state.activeTabId) return
+
+    const dedupeKey = `${reason}:${workspaceId}:${threadId}`
+    const now = Date.now()
+    const last = hiddenThreadToastDedupeRef.current.get(dedupeKey) ?? 0
+    if ((now - last) < 1500) return
+    hiddenThreadToastDedupeRef.current.set(dedupeKey, now)
+
+    const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
+    const message = reason === 'waiting_input'
+      ? `Another chat in ${workspaceName} is waiting for your input`
+      : `Another chat in ${workspaceName} completed`
+
+    state.addToast({
+      id: crypto.randomUUID(),
+      message,
+      type: reason === 'completed' ? 'success' : 'info',
+    })
+  }, [threadId, workspaceId])
 
   // Listen for chat events from main process
   useEffect(() => {
     const unsub = window.api.chat.onEvent((event) => {
-      const { threadId: eventThreadId, type, phase, data } = event
+      const { threadId: eventThreadId, type, phase, data, turnId: eventTurnId } = event
       const realId = realThreadIdRef.current
       if (!realId || eventThreadId !== realId) return
 
-      const typedData = data as Record<string, unknown>
+      const typedData = data as ChatEventData
 
       if (phase === 'turn.started') {
         if (!activeTurnHasItemsRef.current) {
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'running')
+        updateThreadStatusAndLock('running')
         return
       }
 
       if (phase === 'turn.waiting_input') {
         setLoading(false)
-        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
+        updateThreadStatusAndLock('waiting')
+        const waitingMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.waiting_input', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (waitingMessage) {
+          appendChatMessage(waitingMessage)
+        }
+        notifyInactiveChatTab('waiting_input')
         return
       }
 
       if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
         activeTurnHasItemsRef.current = true
-        const itemType = typedData.type as string
-        let msg: ChatMessage | null = null
-        const scopedId = toScopedItemId(typedData.id)
+        const timestamp = Date.now()
+        const scopedId = toScopedItemId(isThreadItemData(typedData) ? typedData.id : undefined)
+        let msg = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId,
+          timestamp,
+        })
 
-        if (itemType === 'agent_message') {
-          const text = (typedData.text as string) ?? ''
-          if (looksInteractiveQuestionText(text)) {
+        if (typedData.type === 'agent_message') {
+          const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
+          if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
             setLoading(false)
-            if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
+            updateThreadStatusAndLock('waiting')
+            notifyInactiveChatTab('waiting_input')
           }
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: text,
-            type: 'text',
-            timestamp: Date.now(),
-          }
-        } else if (itemType === 'command_execution') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: (typedData.command as string) ?? '',
-            type: 'command',
-            timestamp: Date.now(),
-            metadata: {
-              command: typedData.command,
-              aggregated_output: typedData.aggregated_output,
-              exit_code: typedData.exit_code,
-              status: typedData.status,
-            },
-          }
-        } else if (itemType === 'file_change') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: 'File changes',
-            type: 'file-change',
-            timestamp: Date.now(),
-            metadata: {
-              changes: typedData.changes,
-              status: typedData.status,
-            },
-          }
-        } else if (itemType === 'mcp_tool_call') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              server: typedData.server,
-              tool: typedData.tool,
-              arguments: typedData.arguments,
-              status: typedData.status,
-              error: typedData.error,
-            },
-          }
-        } else if (itemType === 'web_search') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              query: typedData.query,
-              status: type === 'item.completed' ? 'completed' : 'in_progress',
-            },
-          }
-        } else if (itemType === 'todo_list') {
-          const items = (typedData.items as Array<{ text?: string; completed?: boolean }> | undefined) ?? []
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              item_count: items.length,
-              completed_count: items.filter((item) => item.completed).length,
-              status: type === 'item.completed' ? 'completed' : 'in_progress',
-            },
-          }
-        } else if (itemType === 'reasoning') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: (typedData.text as string) ?? '',
-            type: 'reasoning',
-            timestamp: Date.now(),
-          }
-        } else if (itemType === 'error') {
-          msg = {
-            id: scopedId,
-            role: 'system',
-            content: (typedData.message as string) ?? 'Unknown error',
-            type: 'text',
-            timestamp: Date.now(),
-            metadata: { error: true },
-          }
-        } else if (itemType) {
-          const interactiveQuestion = getInteractiveQuestion(typedData)
-          if (interactiveQuestion) {
-            setLoading(false)
-            if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
+          if (msg && parsedTextQuestion) {
             msg = {
-              id: scopedId,
-              role: 'assistant',
-              content: interactiveQuestion,
-              type: 'text',
-              timestamp: Date.now(),
+              ...msg,
+              metadata: { interactiveQuestion: parsedTextQuestion },
             }
-          } else {
-            // Fallback for SDK item types we don't model yet: keep them visible
-            // in the tool-calls block instead of silently discarding them.
-            msg = {
-              id: scopedId,
-              role: 'assistant',
-              content: '',
-              type: 'tool-call',
-              timestamp: Date.now(),
-              metadata: {
-                tool_name: itemType,
-                status: typedData.status,
-              },
+          }
+        } else if (typedData.type === 'unknown_item') {
+          const raw = toRecord(typedData.raw)
+          if (raw) {
+            const interactiveQuestion = parseInteractiveQuestionPayload(raw)
+            if (interactiveQuestion) {
+              setLoading(false)
+              updateThreadStatusAndLock('waiting')
+              notifyInactiveChatTab('waiting_input')
+              msg = {
+                id: scopedId,
+                role: 'assistant',
+                content: toInteractiveQuestionText(interactiveQuestion),
+                type: 'text',
+                timestamp,
+                metadata: {
+                  interactiveQuestion,
+                },
+              }
             }
           }
         }
 
-        if (msg) {
-          useAppStore.setState((s) => {
-            const existing = s.chatMessages[threadId] ?? []
-            const idx = existing.findIndex((m) => m.id === msg.id)
-            const updated = idx >= 0
-              ? existing.map((m, i) => (i === idx ? msg : m))
-              : [...existing, msg]
-            return {
-              chatMessages: { ...s.chatMessages, [threadId]: updated },
-            }
-          })
-        }
+        if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'completed')
+        updateThreadStatusAndLock('completed')
+        const completionMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.completed', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (completionMessage) {
+          appendChatMessage(completionMessage)
+        }
+        notifyInactiveChatTab('completed')
+        if (sessionMode === 'plan') {
+          appendPlanCompletionCard(eventTurnId)
+        }
       } else if (phase === 'turn.cancelled') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
+        updateThreadStatusAndLock('idle')
+        const cancelledMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.cancelled', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (cancelledMessage) {
+          appendChatMessage(cancelledMessage)
+        }
       } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
-        const message = (typedData.message as string) ?? 'An error occurred'
-        useAppStore.setState((s) => ({
-          chatMessages: {
-            ...s.chatMessages,
-            [threadId]: [...(s.chatMessages[threadId] ?? []), {
-              id: crypto.randomUUID(),
-              role: 'system' as const,
-              content: message,
-              type: 'text' as const,
-              timestamp: Date.now(),
-              metadata: { error: true },
-            }],
-          },
-        }))
+        updateThreadStatusAndLock('idle')
+        const failureMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId(phase, eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (failureMessage) {
+          appendChatMessage(failureMessage)
+        }
       } else {
         // Forward-compatible fallback: if future SDK versions send question-like
         // top-level events, surface them as assistant messages.
-        const interactiveQuestion = getInteractiveQuestion(typedData)
+        const topLevelPayload = typedData.type === 'unknown_event'
+          ? toRecord(typedData.raw)
+          : toRecord(typedData)
+
+        const interactiveQuestion = topLevelPayload
+          ? parseInteractiveQuestionPayload(topLevelPayload)
+          : null
         if (interactiveQuestion) {
           setLoading(false)
-          if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'waiting')
-          useAppStore.setState((s) => ({
-            chatMessages: {
-              ...s.chatMessages,
-              [threadId]: [...(s.chatMessages[threadId] ?? []), {
-                id: crypto.randomUUID(),
-                role: 'assistant' as const,
-                content: interactiveQuestion,
-                type: 'text' as const,
-                timestamp: Date.now(),
-              }],
+          updateThreadStatusAndLock('waiting')
+          notifyInactiveChatTab('waiting_input')
+          appendChatMessage({
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: toInteractiveQuestionText(interactiveQuestion),
+            type: 'text',
+            timestamp: Date.now(),
+            metadata: {
+              interactiveQuestion,
             },
-          }))
+          })
+          return
+        }
+
+        const fallbackMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: crypto.randomUUID(),
+          timestamp: Date.now(),
+        })
+        if (fallbackMessage) {
+          appendChatMessage(fallbackMessage)
         }
       }
     })
     return unsub
-  }, [threadId, workspaceId, toScopedItemId, setWorkspaceAgentStatus])
+  }, [
+    threadId,
+    workspaceId,
+    toScopedItemId,
+    toLifecycleMessageId,
+    updateThreadStatusAndLock,
+    notifyInactiveChatTab,
+    appendChatMessage,
+    appendPlanCompletionCard,
+    sessionMode,
+  ])
 
   const handleLogin = useCallback(async () => {
     setLoginLoading(true)
@@ -1040,11 +1923,64 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
   }, [setCodexLoggedIn])
 
-  const handleSend = useCallback(async () => {
-    const trimmed = input.trim()
-    if ((!trimmed && attachedImages.length === 0) || !worktreePath) return
+  const handleSend = useCallback(async (overrides?: {
+    text?: string
+    mode?: SessionMode
+    images?: AttachedImage[]
+    forceTakeover?: boolean
+  }) => {
+    const text = overrides?.text ?? input
+    const images = overrides?.images ?? attachedImages
+    const trimmed = text.trim()
+    if ((!trimmed && images.length === 0) || !worktreePath) return
 
-    const isPlanMode = sessionMode === 'plan'
+    const effectiveMode = overrides?.mode ?? sessionMode
+
+    if (activeProject && workspace) {
+      const normalizedBranch = normalizeBranchName(workspace.branch)
+      if (normalizedBranch) {
+        const pendingPayload: PendingSendPayload = {
+          text,
+          mode: effectiveMode,
+          images,
+        }
+
+        const statusConflict = findStatusConflictForCurrentBranch()
+        if (statusConflict && !overrides?.forceTakeover) {
+          setPendingSendPayload(pendingPayload)
+          setBranchConflict(statusConflict)
+          return
+        }
+
+        if (overrides?.forceTakeover) {
+          branchLockKeyRef.current = forceTakeBranchExecutionLock({
+            projectId: activeProject.id,
+            branch: normalizedBranch,
+            workspaceId,
+            threadId,
+            status: 'running',
+          })
+        } else {
+          const lockResult = acquireBranchExecutionLock({
+            projectId: activeProject.id,
+            branch: normalizedBranch,
+            workspaceId,
+            threadId,
+            status: 'running',
+          })
+
+          if (!lockResult.acquired) {
+            setPendingSendPayload(pendingPayload)
+            setBranchConflict(enrichBranchConflict(lockResult.conflict))
+            return
+          }
+
+          branchLockKeyRef.current = lockResult.key
+        }
+      }
+    }
+
+    const isPlanMode = effectiveMode === 'plan'
     const planPrompt = trimmed
       ? `${PLAN_MODE_PREFIX}\n\nUser request:\n${trimmed}`
       : `${PLAN_MODE_PREFIX}\n\nAnalyze the attached image(s) and provide a plan.`
@@ -1066,11 +2002,19 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     // Create real Codex thread if needed (pass model & effort)
     if (!realThreadIdRef.current) {
       try {
-        const realId = await window.api.chat.createThread(worktreePath, model, effort, threadOptions, workspaceId)
+        const realId = await window.api.chat.createThread(
+          worktreePath,
+          model,
+          effort,
+          threadOptions,
+          workspaceId,
+          workspace?.name,
+        )
         realThreadIdRef.current = realId
         eventTurnSequenceRef.current = 0
         activeTurnHasItemsRef.current = false
       } catch (err) {
+        releaseOwnedBranchLock()
         useAppStore.setState((s) => ({
           chatMessages: {
             ...s.chatMessages,
@@ -1092,7 +2036,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: trimmed || (attachedImages.length > 0 ? `[${attachedImages.length} image(s)]` : ''),
+      content: trimmed || (images.length > 0 ? `[${images.length} image(s)]` : ''),
       type: 'text',
       timestamp: Date.now(),
     }
@@ -1106,7 +2050,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     setInput('')
     setAttachedImages([])
     setLoading(true)
-    if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'running')
+    updateThreadStatusAndLock('running')
 
     // Auto-resize textarea
     if (textareaRef.current) {
@@ -1115,12 +2059,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     // Build input payload
     let sendInput: string | Array<{ type: string; text?: string; path?: string }>
-    if (attachedImages.length > 0) {
+    if (images.length > 0) {
       const parts: Array<{ type: string; text?: string; path?: string }> = []
       if (isPlanMode || trimmed) {
         parts.push({ type: 'text', text: isPlanMode ? planPrompt : trimmed })
       }
-      for (const img of attachedImages) {
+      for (const img of images) {
         parts.push({ type: 'local_image', path: img.path })
       }
       sendInput = parts
@@ -1133,7 +2077,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       await window.api.chat.send(realThreadIdRef.current!, sendInput)
     } catch (err) {
       setLoading(false)
-      if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
+      updateThreadStatusAndLock('idle')
       useAppStore.setState((s) => ({
         chatMessages: {
           ...s.chatMessages,
@@ -1148,15 +2092,66 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         },
       }))
     }
-  }, [input, worktreePath, threadId, workspaceId, model, effort, attachedImages, sessionMode, agentPermissionMode, setWorkspaceAgentStatus])
+  }, [
+    input,
+    worktreePath,
+    threadId,
+    workspaceId,
+    workspace?.name,
+    model,
+    effort,
+    attachedImages,
+    sessionMode,
+    activeProject,
+    workspace,
+    agentPermissionMode,
+    findStatusConflictForCurrentBranch,
+    enrichBranchConflict,
+    releaseOwnedBranchLock,
+    updateThreadStatusAndLock,
+  ])
+
+  const handleQuestionOptionSelect = useCallback((answer: string, optionId: string) => {
+    setLoading(false)
+
+    if (optionId === PLAN_ACTION_EXECUTE_ID) {
+      setSessionMode('chat')
+      resetRuntimeThreadState()
+      void handleSend({
+        text: PLAN_EXECUTE_PROMPT,
+        mode: 'chat',
+        images: [],
+      })
+      return
+    }
+
+    if (optionId === PLAN_ACTION_REFINE_ID) {
+      setSessionMode('plan')
+      void handleSend({
+        text: PLAN_REFINE_PROMPT,
+        mode: 'plan',
+        images: [],
+      })
+      return
+    }
+
+    setInput(answer)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.style.height = 'auto'
+      el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    })
+  }, [handleSend, resetRuntimeThreadState])
 
   const handleCancel = useCallback(() => {
     if (realThreadIdRef.current) {
       window.api.chat.cancel(realThreadIdRef.current)
     }
     setLoading(false)
-    if (workspaceId) setWorkspaceAgentStatus(workspaceId, 'idle')
-  }, [workspaceId, setWorkspaceAgentStatus])
+    updateThreadStatusAndLock('idle')
+  }, [updateThreadStatusAndLock])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Tab' && e.shiftKey) {
@@ -1168,7 +2163,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSend()
+      void handleSend()
     }
   }, [handleSend, resetRuntimeThreadState])
 
@@ -1241,114 +2236,24 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [])
 
   const handleSwitchBranchContext = useCallback(async (targetBranch: string) => {
-    if (!activeProject || !workspace) return
+    if (!workspace) return
     const normalizedTargetBranch = normalizeBranchName(targetBranch)
     if (normalizedTargetBranch === normalizeBranchName(workspace.branch)) return
 
-    let targetWorkspace = workspaces.find(
-      (entry) =>
-        entry.projectId === activeProject.id &&
-        normalizeBranchName(entry.branch) === normalizedTargetBranch,
-    )
-
-    if (!targetWorkspace) {
-      const workspaceName = uniqueWorkspaceName(
-        toWorkspaceNameFromBranch(normalizedTargetBranch),
-        activeProject.id,
-        workspaces,
-      )
-
-      try {
-        const worktreePath = await window.api.git.createWorktree(
-          activeProject.repoPath,
-          workspaceName,
-          normalizedTargetBranch,
-          false,
-        )
-
-        targetWorkspace = {
-          id: crypto.randomUUID(),
-          name: workspaceName,
-          type: DEFAULT_WORKSPACE_TYPE,
-          branch: normalizedTargetBranch,
-          worktreePath,
-          projectId: activeProject.id,
-          agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-          memory: '',
-        }
-        addWorkspace(targetWorkspace)
-      } catch (err) {
-        const msg = formatUserError(err, 'Failed to switch branch context')
-
-        if (msg === 'BRANCH_CHECKED_OUT') {
-          try {
-            const listed = await window.api.git.listWorktrees(activeProject.repoPath)
-            const matchingWorktree = listed.find(
-              (entry) =>
-                normalizeBranchName(entry.branch) === normalizedTargetBranch &&
-                entry.path,
-            )
-
-            if (matchingWorktree) {
-              const existingByPath = workspaces.find(
-                (entry) =>
-                  entry.projectId === activeProject.id &&
-                  entry.worktreePath.toLowerCase() === matchingWorktree.path.toLowerCase(),
-              )
-
-              if (existingByPath) {
-                if (normalizeBranchName(existingByPath.branch) !== normalizedTargetBranch) {
-                  updateWorkspaceBranch(existingByPath.id, normalizedTargetBranch)
-                }
-                targetWorkspace = existingByPath
-              } else {
-                targetWorkspace = {
-                  id: crypto.randomUUID(),
-                  name: workspaceName,
-                  type: DEFAULT_WORKSPACE_TYPE,
-                  branch: normalizedTargetBranch,
-                  worktreePath: matchingWorktree.path,
-                  projectId: activeProject.id,
-                  agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-                  memory: '',
-                }
-                addWorkspace(targetWorkspace)
-              }
-            }
-          } catch {
-            // Keep default error path below when recovery fails.
-          }
-        }
-
-        if (!targetWorkspace) {
-          addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
-          return
-        }
-      }
-    }
-
-    setActiveWorkspace(targetWorkspace.id)
-    setLastSelectedBranch(activeProject.id, normalizedTargetBranch)
-
-    const latest = useAppStore.getState()
-    const hasTabs = latest.tabs.some((tab) => tab.workspaceId === targetWorkspace.id)
-    if (!hasTabs) {
-      await createChatForActiveWorkspace()
-    }
+    const targetWorkspace = await resolveBranchWorkspace(normalizedTargetBranch, {
+      createNewBranch: false,
+      errorFallbackMessage: 'Failed to switch branch context',
+    })
+    if (!targetWorkspace) return
+    await activateWorkspaceChat(targetWorkspace.id)
   }, [
-    activeProject,
     workspace,
-    workspaces,
-    addWorkspace,
-    addToast,
-    updateWorkspaceBranch,
-    setActiveWorkspace,
-    setLastSelectedBranch,
-    createChatForActiveWorkspace,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
   ])
 
   const handleCreateBranchContext = useCallback(async () => {
-    if (!activeProject || !workspace) return
+    if (!workspace) return
 
     const branch = normalizeBranchName(createBranchName)
     const baseBranch = normalizeBranchName(createBranchBase) || normalizeBranchName(workspace.branch) || 'main'
@@ -1364,68 +2269,111 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     setCreatingBranch(true)
     try {
-      let targetWorkspace = workspaces.find(
-        (entry) =>
-          entry.projectId === activeProject.id &&
-          normalizeBranchName(entry.branch) === branch,
-      )
+      const targetWorkspace = await resolveBranchWorkspace(branch, {
+        createNewBranch: true,
+        baseBranch,
+        errorFallbackMessage: 'Failed to create branch context',
+      })
+      if (!targetWorkspace) return
 
-      if (!targetWorkspace) {
-        const workspaceName = uniqueWorkspaceName(
-          toWorkspaceNameFromBranch(branch),
-          activeProject.id,
-          workspaces,
-        )
-
-        const worktreePath = await window.api.git.createWorktree(
-          activeProject.repoPath,
-          workspaceName,
-          branch,
-          true,
-          baseBranch,
-        )
-
-        targetWorkspace = {
-          id: crypto.randomUUID(),
-          name: workspaceName,
-          type: DEFAULT_WORKSPACE_TYPE,
-          branch,
-          worktreePath,
-          projectId: activeProject.id,
-          agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-          memory: '',
-        }
-        addWorkspace(targetWorkspace)
-      }
-
-      setActiveWorkspace(targetWorkspace.id)
-      setLastSelectedBranch(activeProject.id, branch)
-
-      const latest = useAppStore.getState()
-      const hasTabs = latest.tabs.some((tab) => tab.workspaceId === targetWorkspace.id)
-      if (!hasTabs) {
-        await createChatForActiveWorkspace()
-      }
+      await activateWorkspaceChat(targetWorkspace.id)
 
       setCreateBranchOpen(false)
       setCreateBranchName('')
-    } catch (err) {
-      const msg = formatUserError(err, 'Failed to create branch context')
-      addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
     } finally {
       setCreatingBranch(false)
     }
   }, [
-    activeProject,
     workspace,
     createBranchName,
     createBranchBase,
-    workspaces,
-    addWorkspace,
     addToast,
-    setActiveWorkspace,
-    setLastSelectedBranch,
-    createChatForActiveWorkspace,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
+  ])
+
+  const handleBranchConflictDismiss = useCallback(() => {
+    setBranchConflict(null)
+    setPendingSendPayload(null)
+  }, [])
+
+  const handleBranchConflictTakeover = useCallback(() => {
+    if (!branchConflict || !workspace || !activeProject) return
+
+    setResolvingBranchConflict(true)
+    window.dispatchEvent(new CustomEvent<InterruptThreadEventDetail>(INTERRUPT_THREAD_EVENT, {
+      detail: {
+        threadId: branchConflict.threadId,
+        reason: 'branch-takeover',
+      },
+    }))
+    updateThreadStatusAndLock('idle')
+    setChatThreadAgentStatus(branchConflict.workspaceId, branchConflict.threadId, 'idle')
+    branchLockKeyRef.current = forceTakeBranchExecutionLock({
+      projectId: activeProject.id,
+      branch: workspace.branch,
+      workspaceId,
+      threadId,
+      status: 'running',
+    })
+
+    const pending = pendingSendPayload
+    setBranchConflict(null)
+    setPendingSendPayload(null)
+    setResolvingBranchConflict(false)
+
+    if (pending) {
+      void handleSend({
+        text: pending.text,
+        mode: pending.mode,
+        images: pending.images,
+        forceTakeover: true,
+      })
+    }
+  }, [
+    branchConflict,
+    workspace,
+    activeProject,
+    workspaceId,
+    threadId,
+    pendingSendPayload,
+    setChatThreadAgentStatus,
+    updateThreadStatusAndLock,
+    handleSend,
+  ])
+
+  const handleBranchConflictCreateIsolated = useCallback(async () => {
+    if (!workspace || !activeProject) return
+    setResolvingBranchConflict(true)
+    try {
+      const isolatedBranch = await suggestIsolatedBranchName()
+      if (!isolatedBranch) return
+
+      const targetWorkspace = await resolveBranchWorkspace(isolatedBranch, {
+        createNewBranch: true,
+        baseBranch: workspace.branch,
+        errorFallbackMessage: 'Failed to create isolated branch context',
+      })
+      if (!targetWorkspace) return
+
+      const targetChat = await activateWorkspaceChat(targetWorkspace.id)
+      if (targetChat?.type === 'chat') {
+        routePendingPromptToThread(targetChat.threadId, pendingSendPayload)
+      }
+
+      setBranchConflict(null)
+      setPendingSendPayload(null)
+    } finally {
+      setResolvingBranchConflict(false)
+    }
+  }, [
+    workspace,
+    activeProject,
+    suggestIsolatedBranchName,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
+    routePendingPromptToThread,
+    pendingSendPayload,
   ])
 
   // File picker
@@ -1486,16 +2434,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         </div>
       ) : (
         <div className={styles.messages} ref={messagesContainerRef}>
-          {renderItems.map((item) => (
-            item.kind === 'message' ? (
-              <MessageBubble
-                key={item.message.id}
-                message={item.message}
-                onQuestionOptionSelect={handleQuestionOptionSelect}
-              />
-            ) : (
-              <ToolCallsBlock key={item.key} messages={item.messages} />
-            )
+          {messages.map((message) => (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onQuestionOptionSelect={handleQuestionOptionSelect}
+            />
           ))}
           {loading && <LoadingIndicator />}
           <div ref={messagesEndRef} />
@@ -1666,6 +2610,57 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           </div>
         )}
       </div>
+
+      <Dialog
+        open={!!branchConflict}
+        onOpenChange={(_, data) => {
+          if (!data.open && !resolvingBranchConflict) {
+            handleBranchConflictDismiss()
+          }
+        }}
+      >
+        <DialogSurface className={styles.branchConflictSurface}>
+          <DialogBody>
+            <DialogTitle>Branch is busy</DialogTitle>
+            <DialogContent className={styles.branchConflictContent}>
+              {branchConflict && (
+                <>
+                  <div>
+                    {branchConflict.threadTitle ?? 'Another thread'} is currently {branchConflict.status} on branch{' '}
+                    <code>{branchConflict.branch}</code>.
+                  </div>
+                  <div className={styles.branchConflictMeta}>
+                    Workspace: {branchConflict.workspaceName ?? branchConflict.workspaceId}
+                  </div>
+                </>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                onClick={handleBranchConflictDismiss}
+                disabled={resolvingBranchConflict}
+              >
+                Keep read-only
+              </Button>
+              <Button
+                appearance="secondary"
+                onClick={() => { void handleBranchConflictCreateIsolated() }}
+                disabled={resolvingBranchConflict}
+              >
+                {resolvingBranchConflict ? 'Switching...' : 'Create isolated branch'}
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={handleBranchConflictTakeover}
+                disabled={resolvingBranchConflict}
+              >
+                Take control
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
 
       <Dialog
         open={createBranchOpen}

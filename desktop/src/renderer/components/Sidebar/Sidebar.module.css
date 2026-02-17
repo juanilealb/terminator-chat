@@ -663,59 +663,17 @@
   padding: 0 var(--spacingHorizontalXXS);
 }
 
-.threadTree {
-  position: relative;
-  margin-left: 8px;
-}
-
-.threadTree::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 10px;
-  bottom: 10px;
-  width: 1px;
-  background: color-mix(in srgb, var(--colorNeutralForeground3) 35%, transparent);
-}
-
-.threadTreeRow {
-  position: relative;
-  padding-left: 10px;
-}
-
-.threadTreeRow::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  width: 8px;
-  height: 1px;
-  transform: translateY(-0.5px);
-  background: color-mix(in srgb, var(--colorNeutralForeground3) 35%, transparent);
-}
-
-.threadTreeRow:last-child::after {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 50%;
-  bottom: 0;
-  width: 1px;
-  background: var(--colorNeutralBackground2);
-}
-
 .workspaceItem {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--spacingHorizontalXS);
   margin: 1px var(--spacingHorizontalXXS);
-  padding: 6px var(--spacingHorizontalS);
-  padding-left: var(--spacingHorizontalL);
+  padding: 3px 8px 3px 20px;
   border-radius: var(--borderRadiusMedium);
   cursor: pointer;
   color: var(--colorNeutralForeground2);
-  font-size: var(--fontSizeBase200);
-  font-family: var(--fontFamilyMonospace);
+  font-size: 12.5px;
+  font-family: var(--fontFamilyBase);
   transition: background var(--durationFaster) var(--curveEasyEase),
     color var(--durationFaster) var(--curveEasyEase);
   position: relative;
@@ -744,19 +702,17 @@
   background: var(--colorBrandBackground);
 }
 
-/* Status indicator states — hide the icon to show the status overlay */
-.workspaceItem.unread .workspaceIcon,
-.workspaceItem.claudeActive .workspaceIcon,
-.workspaceItem.completed .workspaceIcon,
-.workspaceItem.waitingInput .workspaceIcon {
-  visibility: hidden;
+/* Unread name style */
+.workspaceItem.unread .threadName {
+  font-weight: 600;
+  color: var(--colorNeutralForeground1);
 }
 
 /* Unread dot */
 .workspaceItem.unread::after {
   content: '';
   position: absolute;
-  left: 12px;
+  left: 8px;
   top: 50%;
   transform: translate(-50%, -50%);
   width: 6px;
@@ -769,7 +725,7 @@
 .workspaceItem.completed::after {
   content: '';
   position: absolute;
-  left: 12px;
+  left: 8px;
   top: 50%;
   transform: translate(-50%, -50%);
   width: 7px;
@@ -783,7 +739,7 @@
 .workspaceItem.claudeActive::after {
   content: '';
   position: absolute;
-  left: 12px;
+  left: 8px;
   top: 50%;
   margin-top: -5px;
   margin-left: -5px;
@@ -800,7 +756,7 @@
 .workspaceItem.waitingInput::after {
   content: '';
   position: absolute;
-  left: 12px;
+  left: 8px;
   top: 50%;
   transform: translate(-50%, -50%);
   width: 7px;
@@ -820,39 +776,26 @@
   }
 }
 
-.workspaceIcon {
-  width: 14px;
-  flex-shrink: 0;
-  text-align: center;
-  color: var(--colorNeutralForeground3);
-  font-size: var(--fontSizeBase100);
-  margin-top: 2px;
-}
-
-.workspaceNameCol {
+.threadName {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.workspaceName {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspaceNameInput {
-  all: unset;
-  width: 100%;
-  font-size: inherit;
-  font-family: var(--fontFamilyMonospace);
-  color: var(--colorNeutralForeground1);
-  background: var(--colorNeutralBackground1);
-  border: 1px solid var(--colorBrandStroke1);
-  border-radius: var(--borderRadiusSmall);
-  padding: 0 var(--spacingHorizontalXXS);
-  margin: -1px 0;
+.threadTime {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--colorNeutralForeground3);
+  margin-left: 8px;
+}
+
+.threadCountBadge {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--colorNeutralForeground3);
+  font-weight: normal;
 }
 
 /* Workspace delete button — hidden by default, shown on hover */
@@ -884,6 +827,10 @@
 
 .workspaceItem:hover .workspaceDeleteBtn {
   display: flex;
+}
+
+.workspaceItem:hover .threadTime {
+  display: none;
 }
 
 /* ── Workspace Meta (PR info, branch) ── */

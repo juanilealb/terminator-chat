@@ -199,7 +199,7 @@ export function App() {
 
   // Listen for workspace notification signals from Claude Code hooks
   useEffect(() => {
-    const unsub = window.api.claude.onNotifyWorkspace(({ workspaceId, reason }) => {
+    const unsub = window.api.claude.onNotifyWorkspace(({ workspaceId, workspaceLabel, reason }) => {
       const dedupeKey = `${workspaceId}:${reason}`
       const now = Date.now()
       const last = notifyToastDedupeRef.current.get(dedupeKey) ?? 0
@@ -217,7 +217,7 @@ export function App() {
         state.setWorkspaceAgentStatus(workspaceId, 'waiting')
       }
 
-      const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceId
+      const workspaceName = state.workspaces.find((ws) => ws.id === workspaceId)?.name ?? workspaceLabel ?? workspaceId
       const message = reason === 'waiting_input'
         ? `Agent waiting for your input in ${workspaceName}`
         : `Agent completed in ${workspaceName}`

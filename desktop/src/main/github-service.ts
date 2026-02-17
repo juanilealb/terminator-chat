@@ -12,6 +12,17 @@ import type {
 
 const execFileAsync = promisify(execFile)
 
+function execFileHidden(
+  file: string,
+  args: string[],
+  options: Record<string, unknown> = {},
+) {
+  return execFileAsync(file, args, {
+    windowsHide: true,
+    ...options,
+  })
+}
+
 interface GithubRepoInfo {
   owner: string
   name: string
@@ -124,7 +135,7 @@ export class GithubService {
   static async isGhAvailable(): Promise<boolean> {
     if (this.ghAvailable !== null) return this.ghAvailable
     try {
-      const { stdout } = await execFileAsync('gh', ['--version'], { timeout: 5000 })
+      const { stdout } = await execFileHidden('gh', ['--version'], { timeout: 5000 })
       this.ghAvailable = true
       console.log('[GithubService] gh CLI available:', stdout.trim().split('\n')[0])
     } catch (err) {
@@ -145,7 +156,7 @@ export class GithubService {
     const cached = this.repoInfoCache.get(repoPath)
     if (cached !== undefined) return cached
     try {
-      const { stdout } = await execFileAsync('git', ['remote', 'get-url', 'origin'], {
+      const { stdout } = await execFileHidden('git', ['remote', 'get-url', 'origin'], {
         cwd: repoPath,
         timeout: 5000,
       })
@@ -287,7 +298,7 @@ export class GithubService {
     this.authTokenChecked = true
     this.authTokenFetchedAt = now
     try {
-      const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 5000 })
+      const { stdout } = await execFileHidden('gh', ['auth', 'token'], { timeout: 5000 })
       const token = stdout.trim()
       this.authToken = token || null
       if (!this.authToken) {
@@ -318,7 +329,7 @@ export class GithubService {
 
       for (const user of users) {
         try {
-          const { stdout: tokenOut } = await execFileAsync(
+          const { stdout: tokenOut } = await execFileHidden(
             'gh',
             ['auth', 'token', '--hostname', 'github.com', '--user', user.login],
             { timeout: 5000 }
@@ -343,7 +354,7 @@ export class GithubService {
   }
 
   private static async loadAuthUsers(host: string): Promise<Array<{ login: string; active: boolean }>> {
-    const { stdout } = await execFileAsync('gh', ['auth', 'status', '--json', 'hosts'], { timeout: 5000 })
+    const { stdout } = await execFileHidden('gh', ['auth', 'status', '--json', 'hosts'], { timeout: 5000 })
     const parsed = JSON.parse(stdout) as { hosts?: Record<string, GhAuthHostEntry[]> }
     const users = (parsed.hosts?.[host] ?? [])
       .filter((entry) => entry.state === 'success' && typeof entry.login === 'string' && entry.login.trim().length > 0)

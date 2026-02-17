@@ -55,12 +55,13 @@ function activateWorkspace(workspaceId: string): void {
   win.webContents.send(IPC.ACTIVATE_WORKSPACE, workspaceId)
 }
 
-function showWindowsNotification(workspaceId: string, reason: AgentNotifyReason): void {
+function showWindowsNotification(workspaceId: string, workspaceLabel: string | undefined, reason: AgentNotifyReason): void {
   if (!Notification.isSupported()) return
 
+  const displayName = workspaceLabel?.trim() || workspaceId
   const body = reason === 'waiting_input'
-    ? `Agent waiting for your input in workspace ${workspaceId}`
-    : `Agent completed in workspace ${workspaceId}`
+    ? `Agent waiting for your input in ${displayName}`
+    : `Agent completed in ${displayName}`
 
   const notification = new Notification({
     title: 'Terminator Chat',
@@ -78,6 +79,7 @@ export function notifyWorkspace(
     turnId?: string
     source?: 'hook' | 'chat'
     dedupeMs?: number
+    workspaceLabel?: string
   },
 ): void {
   if (!workspaceId) return
@@ -101,6 +103,7 @@ export function notifyWorkspace(
       notifyId: crypto.randomUUID(),
       ts: Date.now(),
       workspaceId,
+      workspaceLabel: options?.workspaceLabel,
       reason,
       turnId: options?.turnId,
       source: options?.source,
@@ -108,7 +111,7 @@ export function notifyWorkspace(
   }
 
   if (anyBackgroundWindow) {
-    showWindowsNotification(workspaceId, reason)
+    showWindowsNotification(workspaceId, options?.workspaceLabel, reason)
   }
 }
 

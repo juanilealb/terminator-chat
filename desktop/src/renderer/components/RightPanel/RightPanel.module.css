@@ -118,6 +118,36 @@
   width: 100%;
 }
 
+.flowDetailRow {
+  align-items: center;
+  display: flex;
+  gap: var(--space-2);
+}
+
+.flowDetailLabel {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+}
+
+.flowSelect {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.flowSelect:focus {
+  border-color: var(--accent-blue);
+  outline: none;
+}
+
 .commitButton {
   flex: 1;
   min-height: 30px;

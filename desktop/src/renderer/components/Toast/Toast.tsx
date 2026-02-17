@@ -21,7 +21,7 @@ export function ToastContainer() {
       if (dispatched.current.has(t.id)) continue
       dispatched.current.add(t.id)
 
-      const intent: ToastIntent = t.type === 'error' ? 'error' : 'info'
+      const intent: ToastIntent = t.type === 'error' ? 'error' : t.type === 'success' ? 'success' : 'info'
       dispatchToast(
         <Toast>
           <ToastTitle>{t.message}</ToastTitle>

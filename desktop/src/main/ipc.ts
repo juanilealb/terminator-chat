@@ -1,5 +1,5 @@
 import { ipcMain, dialog, app, BrowserWindow, clipboard } from 'electron'
-import { join, relative } from 'path'
+import { join, relative, basename } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -22,6 +22,13 @@ const codexService = new CodexService()
 
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
+const EDITOR_LAUNCH_GRACE_MS = (() => {
+  const raw = Number.parseInt(process.env.TERMINATOR_EDITOR_LAUNCH_GRACE_MS ?? '', 10)
+  if (Number.isFinite(raw)) {
+    return Math.min(10000, Math.max(400, raw))
+  }
+  return 2500
+})()
 
 function serializeError(error: unknown): unknown {
   if (error instanceof Error) {
@@ -284,9 +291,9 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     )
   })
 
-  ipcMain.handle(IPC.GIT_OPEN_OR_CREATE_PR, async (_e, worktreePath: string) => {
-    return runGitOperation('open-or-create-pr', { worktreePath }, () =>
-      GitService.openOrCreatePullRequest(worktreePath),
+  ipcMain.handle(IPC.GIT_OPEN_OR_CREATE_PR, async (_e, worktreePath: string, baseBranch?: string) => {
+    return runGitOperation('open-or-create-pr', { worktreePath, baseBranch }, () =>
+      GitService.openOrCreatePullRequest(worktreePath, baseBranch),
     )
   })
 
@@ -487,6 +494,26 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     }
   })
 
+  ipcMain.handle(
+    IPC.APP_CREATE_PROJECT,
+    async (
+      _e,
+      input: {
+        parentDir: string
+        projectName: string
+        ownership: 'personal' | 'work'
+        createRemote?: boolean
+        visibility?: 'public' | 'private'
+        githubOwner?: string
+      },
+    ) =>
+      runGitOperation(
+        'app:create-project',
+        { parentDir: input.parentDir, projectName: input.projectName, ownership: input.ownership, createRemote: input.createRemote },
+        () => GitService.createProjectRepository(input),
+      ),
+  )
+
   ipcMain.handle(IPC.APP_GET_DATA_PATH, async () => {
     return app.getPath('userData')
   })
@@ -542,15 +569,11 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     return win.isMaximized()
   })
 
-  function quoteCmdArg(value: string): string {
-    return `"${value.replace(/"/g, '\\"')}"`
-  }
-
   type EditorKind = 'vscode' | 'cursor'
 
   type LaunchAttempt =
     | { kind: 'direct'; command: string; args: string[] }
-    | { kind: 'cmd'; commandLine: string }
+    | { kind: 'cmd'; command: string; args: string[] }
 
   function pushIfExists(target: LaunchAttempt[], filePath: string, args: string[]): void {
     if (existsSync(filePath)) {
@@ -563,15 +586,25 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     pushIfExists(target, filePath, [dirPath])
   }
 
+  function pushScriptCommandVariants(target: LaunchAttempt[], filePath: string, dirPath: string): void {
+    if (!existsSync(filePath)) return
+    const folderUri = toFolderUri(dirPath)
+    target.push({ kind: 'cmd', command: filePath, args: ['-n', dirPath] })
+    target.push({ kind: 'cmd', command: filePath, args: ['--new-window', dirPath] })
+    target.push({ kind: 'cmd', command: filePath, args: ['--folder-uri', folderUri] })
+    target.push({ kind: 'cmd', command: filePath, args: [dirPath] })
+  }
+
   function toFolderUri(dirPath: string): string {
     return pathToFileURL(dirPath).toString()
   }
 
   function pushCliAttempts(target: LaunchAttempt[], commandName: string, dirPath: string): void {
     const folderUri = toFolderUri(dirPath)
-    target.push({ kind: 'cmd', commandLine: `${commandName} --folder-uri ${quoteCmdArg(folderUri)}` })
-    target.push({ kind: 'cmd', commandLine: `${commandName} -n ${quoteCmdArg(dirPath)}` })
-    target.push({ kind: 'cmd', commandLine: `${commandName} ${quoteCmdArg(dirPath)}` })
+    target.push({ kind: 'cmd', command: commandName, args: ['-n', dirPath] })
+    target.push({ kind: 'cmd', command: commandName, args: ['--new-window', dirPath] })
+    target.push({ kind: 'cmd', command: commandName, args: ['--folder-uri', folderUri] })
+    target.push({ kind: 'cmd', command: commandName, args: [dirPath] })
   }
 
   function pushVSCodeCommandVariants(target: LaunchAttempt[], filePath: string, dirPath: string): void {
@@ -584,34 +617,36 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   function buildEditorLaunchAttempts(editor: EditorKind, dirPath: string): LaunchAttempt[] {
     const attempts: LaunchAttempt[] = []
-    const localAppData = process.env.LOCALAPPDATA ?? ''
+    const localAppData = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? '', 'AppData', 'Local')
     const programFiles = process.env.ProgramFiles ?? ''
     const programFilesX86 = process.env['ProgramFiles(x86)'] ?? ''
     if (process.platform === 'win32') {
       if (editor === 'vscode') {
-        // Prefer direct executable paths first to avoid shell parsing quirks.
-        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\Code.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\Code.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\Code.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
-        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd`, dirPath)
+        // Prefer CLI variants first. They return reliable exit codes and consistently open folders.
+        pushScriptCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\bin\\code.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\bin\\code-insiders.cmd`, dirPath)
 
-        // CLI fallbacks
+        // PATH CLI fallbacks
         pushCliAttempts(attempts, 'code', dirPath)
         pushCliAttempts(attempts, 'code-insiders', dirPath)
         pushCliAttempts(attempts, 'codium', dirPath)
+
+        // As a last resort, try direct executables.
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code\\Code.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${localAppData}\\Programs\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFiles}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
+        pushVSCodeCommandVariants(attempts, `${programFilesX86}\\Microsoft VS Code Insiders\\Code - Insiders.exe`, dirPath)
       } else {
         pushCommandVariants(attempts, `${localAppData}\\Programs\\Cursor\\Cursor.exe`, dirPath)
         pushCommandVariants(attempts, `${programFiles}\\Cursor\\Cursor.exe`, dirPath)
         pushCommandVariants(attempts, `${programFilesX86}\\Cursor\\Cursor.exe`, dirPath)
-        pushCommandVariants(attempts, `${localAppData}\\Programs\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
-        pushCommandVariants(attempts, `${programFiles}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
-        pushCommandVariants(attempts, `${programFilesX86}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${localAppData}\\Programs\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${programFiles}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
+        pushScriptCommandVariants(attempts, `${programFilesX86}\\Cursor\\resources\\app\\bin\\cursor.cmd`, dirPath)
 
         // CLI fallback
         pushCliAttempts(attempts, 'cursor', dirPath)
@@ -625,7 +660,16 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     return attempts
   }
 
-  async function runLaunchAttempt(attempt: LaunchAttempt, cwdPath: string): Promise<boolean> {
+  function describeAttempt(attempt: LaunchAttempt): string {
+    return basename(attempt.command)
+  }
+
+  function launchErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message.trim()) return error.message
+    return 'launch failed'
+  }
+
+  async function runLaunchAttempt(attempt: LaunchAttempt, cwdPath: string): Promise<{ ok: boolean; error?: string }> {
     const { spawn } = await import('child_process')
     const commonOptions = {
       detached: true,
@@ -635,23 +679,37 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     }
 
     if (attempt.kind === 'cmd') {
-      return await new Promise<boolean>((resolve) => {
-        const child = spawn('cmd.exe', ['/d', '/s', '/c', attempt.commandLine], commonOptions)
-        child.once('error', () => resolve(false))
-        child.once('close', (code) => resolve(code === 0))
+      return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        const child = spawn('cmd.exe', ['/d', '/c', attempt.command, ...attempt.args], commonOptions)
+        child.once('error', (error) => resolve({ ok: false, error: launchErrorMessage(error) }))
+        child.once('close', (code) => {
+          if (code === 0) resolve({ ok: true })
+          else resolve({ ok: false, error: `exit ${code ?? 'null'}` })
+        })
         child.once('spawn', () => child.unref())
       })
     }
 
-    return await new Promise<boolean>((resolve) => {
+    return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      let settled = false
+      let closeTimer: NodeJS.Timeout | null = null
+      const finish = (result: { ok: boolean; error?: string }) => {
+        if (settled) return
+        settled = true
+        if (closeTimer) clearTimeout(closeTimer)
+        resolve(result)
+      }
       const child = spawn(attempt.command, attempt.args, commonOptions)
-      child.once('error', () => resolve(false))
+      child.once('error', (error) => finish({ ok: false, error: launchErrorMessage(error) }))
       child.once('spawn', () => {
         child.unref()
-        resolve(true)
+        // Some launchers fail immediately after spawn (bad args/path/permissions).
+        // Wait a short grace period so we can catch a fast non-zero exit.
+        closeTimer = setTimeout(() => finish({ ok: true }), EDITOR_LAUNCH_GRACE_MS)
       })
       child.once('close', (code) => {
-        if (code !== 0) resolve(false)
+        if (code === 0) finish({ ok: true })
+        else finish({ ok: false, error: `exit ${code ?? 'null'}` })
       })
     })
   }
@@ -665,21 +723,29 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     }
 
     const attempts = buildEditorLaunchAttempts(editor, dirPath)
+    const failureHints: string[] = []
     for (const attempt of attempts) {
-      if (await runLaunchAttempt(attempt, dirPath)) {
+      const launched = await runLaunchAttempt(attempt, dirPath)
+      if (launched.ok) {
         return { ok: true }
+      }
+      if (launched.error) {
+        failureHints.push(`${describeAttempt(attempt)}: ${launched.error}`)
       }
     }
 
+    const debugHint = failureHints.length > 0
+      ? ` Last attempt: ${failureHints[failureHints.length - 1]}.`
+      : ''
     if (editor === 'vscode') {
       return {
         ok: false,
-        error: 'Could not open VS Code. Install the "code" command in PATH or reinstall VS Code with CLI support.',
+        error: `Could not open VS Code. Install the "code" command in PATH or reinstall VS Code with CLI support.${debugHint}`,
       }
     }
     return {
       ok: false,
-      error: 'Could not open Cursor. Install the "cursor" command in PATH from Cursor Command Palette.',
+      error: `Could not open Cursor. Install the "cursor" command in PATH from Cursor Command Palette.${debugHint}`,
     }
   }
 
@@ -1020,6 +1086,7 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
         approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
       },
       workspaceId?: string,
+      workspaceLabel?: string,
     ) => {
       // Refresh token if needed before creating thread
       try {
@@ -1028,7 +1095,7 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
       } catch {
         // Token may still be valid, let it try
       }
-      return codexService.createThread(workingDir, model, effort, options, workspaceId)
+      return codexService.createThread(workingDir, model, effort, options, workspaceId, workspaceLabel)
     },
   )
 

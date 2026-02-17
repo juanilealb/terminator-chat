@@ -105,7 +105,7 @@ function TemplateEditorRow({
         className={styles.templateContentInput}
         value={template.content}
         onChange={(_, data) => onChange({ content: data.value })}
-        placeholder="Template text. Mentions: @workspace @branch @path @memory @file:README.md"
+        placeholder="Template text. Mentions: @workspace @branch @path @memory @date @file:README.md @file:'docs/my file.md'"
         resize="vertical"
         size="small"
       />
@@ -607,7 +607,7 @@ export function SettingsPanel() {
             <Card className={styles.card}>
               <Caption1 className={styles.templateHelp}>
                 Reusable prompts for command palette and workspace memory. Mentions:{' '}
-                <code>@workspace</code>, <code>@branch</code>, <code>@path</code>, <code>@memory</code>, <code>@file:&lt;relative-path&gt;</code>.
+                <code>@workspace</code>, <code>@branch</code>, <code>@path</code>, <code>@memory</code>, <code>@date</code>, <code>@file:&lt;relative-path&gt;</code>. Legacy syntax like <code>{'{{workspace}}'}</code> also works.
               </Caption1>
               {settings.promptTemplates.map((template) => (
                 <TemplateEditorRow

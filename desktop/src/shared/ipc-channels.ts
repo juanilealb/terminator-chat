@@ -11,6 +11,7 @@ export interface AgentNotifyEvent {
   notifyId: string
   ts: number
   workspaceId: string
+  workspaceLabel?: string
   reason: AgentNotifyReason
   turnId?: string
   source?: 'hook' | 'chat'
@@ -35,15 +36,124 @@ export type ChatLifecyclePhase =
   | 'error'
   | 'unknown'
 
+export interface ChatUsage {
+  input_tokens: number
+  cached_input_tokens: number
+  output_tokens: number
+}
+
+export type ChatCommandExecutionStatus = 'in_progress' | 'completed' | 'failed'
+export type ChatPatchChangeKind = 'add' | 'delete' | 'update'
+export type ChatPatchApplyStatus = 'completed' | 'failed'
+export type ChatMcpToolCallStatus = 'in_progress' | 'completed' | 'failed'
+
+export interface ChatAgentMessageItemData {
+  type: 'agent_message'
+  id: string
+  text: string
+}
+
+export interface ChatReasoningItemData {
+  type: 'reasoning'
+  id: string
+  text: string
+}
+
+export interface ChatCommandExecutionItemData {
+  type: 'command_execution'
+  id: string
+  command: string
+  aggregated_output: string
+  exit_code?: number
+  status: ChatCommandExecutionStatus
+}
+
+export interface ChatFileChangeItemData {
+  type: 'file_change'
+  id: string
+  changes: Array<{
+    path: string
+    kind: ChatPatchChangeKind
+  }>
+  status: ChatPatchApplyStatus
+}
+
+export interface ChatMcpToolCallItemData {
+  type: 'mcp_tool_call'
+  id: string
+  server: string
+  tool: string
+  arguments: unknown
+  result?: {
+    content: unknown[]
+    structured_content: unknown
+  }
+  error?: {
+    message: string
+  }
+  status: ChatMcpToolCallStatus
+}
+
+export interface ChatWebSearchItemData {
+  type: 'web_search'
+  id: string
+  query: string
+}
+
+export interface ChatTodoListItemData {
+  type: 'todo_list'
+  id: string
+  items: Array<{
+    text: string
+    completed: boolean
+  }>
+}
+
+export interface ChatErrorItemData {
+  type: 'error'
+  id: string
+  message: string
+}
+
+export interface ChatUnknownItemData {
+  type: 'unknown_item'
+  id: string
+  item_type: string
+  raw: Record<string, unknown>
+}
+
+export type ChatThreadItemData =
+  | ChatAgentMessageItemData
+  | ChatReasoningItemData
+  | ChatCommandExecutionItemData
+  | ChatFileChangeItemData
+  | ChatMcpToolCallItemData
+  | ChatWebSearchItemData
+  | ChatTodoListItemData
+  | ChatErrorItemData
+  | ChatUnknownItemData
+
+export type ChatEventData =
+  | { type: 'thread.started'; thread_id: string }
+  | { type: 'turn.started' }
+  | { type: 'turn.waiting_input' }
+  | { type: 'turn.completed'; usage: ChatUsage }
+  | { type: 'turn.failed'; message: string }
+  | { type: 'turn.cancelled' }
+  | { type: 'error'; message: string }
+  | ChatThreadItemData
+  | { type: 'unknown_event'; raw: Record<string, unknown> }
+
 export interface ChatEventPayload {
   eventId: string
+  eventVersion: 'sdk-0.101.0'
   threadId: string
   workspaceId?: string
   turnId?: string
   type: string
   phase: ChatLifecyclePhase
   ts: number
-  data: Record<string, unknown>
+  data: ChatEventData
 }
 
 // IPC channel constants shared between main and renderer
@@ -85,6 +195,7 @@ export const IPC = {
   // App operations
   APP_SELECT_DIRECTORY: 'app:select-directory',
   APP_ADD_PROJECT_PATH: 'app:add-project-path',
+  APP_CREATE_PROJECT: 'app:create-project',
   APP_GET_DATA_PATH: 'app:get-data-path',
   APP_SET_UNREAD_COUNT: 'app:set-unread-count',
   APP_SET_ACTIVE_WORKSPACE: 'app:set-active-workspace',

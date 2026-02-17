@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
-import { copyFile, mkdir, readdir, rm } from 'fs/promises'
+import { copyFile, mkdir, readdir, rm, writeFile } from 'fs/promises'
 import { promisify } from 'util'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'path'
 import type { CreateWorktreeProgress } from '../shared/workspace-creation'
@@ -50,16 +50,38 @@ export interface ShipToMainResult {
 }
 
 const SNAPSHOT_PREFIX = '[terminator-chat:snapshot]'
+const WINDOWS_RESERVED_BASENAME_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 
 export interface PrWorktreeResult {
   worktreePath: string
   branch: string
 }
 
+export interface CreateProjectRepoOptions {
+  parentDir: string
+  projectName: string
+  ownership: 'personal' | 'work'
+  createRemote?: boolean
+  visibility?: 'public' | 'private'
+  githubOwner?: string
+}
+
+export interface CreateProjectRepoResult {
+  repoPath: string
+  remoteUrl?: string
+  branch: string
+}
+
+interface CommitAuthorIdentity {
+  name: string
+  email: string
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
     cwd,
     maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
   })
   return stdout.trimEnd()
 }
@@ -68,8 +90,50 @@ async function gh(args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFileAsync('gh', args, {
     cwd,
     maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
   })
   return stdout.trim()
+}
+
+async function gitConfigGet(cwd: string, key: string, scope: '--local' | '--global'): Promise<string> {
+  try {
+    const value = await git(['config', scope, '--get', key], cwd)
+    return value.trim()
+  } catch {
+    return ''
+  }
+}
+
+function fallbackAuthorIdentity(ownership: 'personal' | 'work'): CommitAuthorIdentity {
+  if (ownership === 'work') {
+    return {
+      name: 'jleal-quintana',
+      email: 'jleal@quintanaep.com',
+    }
+  }
+  return {
+    name: 'juanilealb',
+    email: '126987726+juanilealb@users.noreply.github.com',
+  }
+}
+
+async function resolveCommitAuthorIdentity(
+  cwd: string,
+  ownership: 'personal' | 'work',
+): Promise<CommitAuthorIdentity> {
+  const localName = await gitConfigGet(cwd, 'user.name', '--local')
+  const localEmail = await gitConfigGet(cwd, 'user.email', '--local')
+  if (localName && localEmail) {
+    return { name: localName, email: localEmail }
+  }
+
+  const globalName = await gitConfigGet(cwd, 'user.name', '--global')
+  const globalEmail = await gitConfigGet(cwd, 'user.email', '--global')
+  if (globalName && globalEmail) {
+    return { name: globalName, email: globalEmail }
+  }
+
+  return fallbackAuthorIdentity(ownership)
 }
 
 /** Extract a user-friendly message from a git exec error */
@@ -134,6 +198,14 @@ function friendlyGhError(err: unknown, fallback: string): string {
   }
 
   return stderr.split('\n').find((line) => line.trim())?.trim() ?? fallback
+}
+
+function normalizeBranchName(value: string): string {
+  return value
+    .trim()
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^origin\//, '')
 }
 
 function isAlreadyMissingWorktreeError(err: unknown): boolean {
@@ -233,6 +305,51 @@ function sanitizeWorktreeName(name: string): string {
   return safe || 'worktree'
 }
 
+function sanitizeGithubRepoName(name: string): string {
+  const safe = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+/, '')
+    .replace(/[.-]+$/, '')
+  return safe || 'project'
+}
+
+function sanitizeLocalFolderName(name: string): string {
+  const safe = name
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.\-\s]+/, '')
+    .replace(/[.\-\s]+$/, '')
+  return safe || 'project'
+}
+
+function normalizeStatusPathForChecks(path: string): string {
+  let normalized = path.trim().replace(/\\/g, '/')
+  if (normalized.includes(' -> ')) {
+    const renamedParts = normalized.split(' -> ')
+    normalized = renamedParts[renamedParts.length - 1] ?? normalized
+  }
+  if (
+    (normalized.startsWith('"') && normalized.endsWith('"'))
+    || (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1)
+  }
+  return normalized
+}
+
+function isWindowsReservedPath(path: string): boolean {
+  if (process.platform !== 'win32') return false
+  const normalized = normalizeStatusPathForChecks(path)
+  const baseName = basename(normalized).replace(/[. ]+$/g, '')
+  if (!baseName) return false
+  return WINDOWS_RESERVED_BASENAME_RE.test(baseName)
+}
+
 function ensureWithinParent(parentDir: string, candidatePath: string): void {
   const parent = resolve(parentDir)
   const candidate = resolve(candidatePath)
@@ -283,24 +400,33 @@ export class GitService {
   }
 
   static async getDefaultBranch(repoPath: string): Promise<string> {
-    // Best effort sync of origin/HEAD. Network hiccups should not block worktree creation.
-    await git(['remote', 'set-head', 'origin', '--auto'], repoPath).catch(() => {})
+    const hasOrigin = await GitService.hasRemote(repoPath, 'origin')
+    if (hasOrigin) {
+      // Best effort sync of origin/HEAD. Network hiccups should not block worktree creation.
+      await git(['remote', 'set-head', 'origin', '--auto'], repoPath).catch(() => {})
 
-    const ref = await git(['symbolic-ref', 'refs/remotes/origin/HEAD'], repoPath).catch(() => '')
-    // "refs/remotes/origin/main" → "origin/main"
-    if (ref) return ref.replace('refs/remotes/', '')
+      const ref = await git(['symbolic-ref', 'refs/remotes/origin/HEAD'], repoPath).catch(() => '')
+      // "refs/remotes/origin/main" -> "origin/main"
+      if (ref) return ref.replace('refs/remotes/', '')
 
-    // Fallback for repos where origin/HEAD is unset.
-    for (const candidate of ['origin/main', 'origin/master']) {
-      const exists = await git(['rev-parse', '--verify', `refs/remotes/${candidate}`], repoPath)
+      // Fallback for repos where origin/HEAD is unset.
+      for (const candidate of ['origin/main', 'origin/master']) {
+        const exists = await git(['rev-parse', '--verify', `refs/remotes/${candidate}`], repoPath)
+          .then(() => true, () => false)
+        if (exists) return candidate
+      }
+    }
+
+    const local = await git(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath).catch(() => '')
+    if (local && local !== 'HEAD') return local
+
+    for (const candidate of ['main', 'master']) {
+      const exists = await git(['rev-parse', '--verify', `refs/heads/${candidate}`], repoPath)
         .then(() => true, () => false)
       if (exists) return candidate
     }
 
-    const local = await git(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath).catch(() => '')
-    if (local && local !== 'HEAD') return local.startsWith('origin/') ? local : `origin/${local}`
-
-    return 'origin/main'
+    return 'main'
   }
 
   static async hasRemote(repoPath: string, remoteName: string): Promise<boolean> {
@@ -308,6 +434,88 @@ export class GitService {
       () => true,
       () => false
     )
+  }
+
+  static async createProjectRepository(options: CreateProjectRepoOptions): Promise<CreateProjectRepoResult> {
+    const projectName = options.projectName.trim()
+    if (!projectName) throw new Error('Project name is required')
+    const parentDir = resolve(options.parentDir)
+    const localFolderName = sanitizeLocalFolderName(projectName)
+    const repoPath = resolve(parentDir, localFolderName)
+    ensureWithinParent(parentDir, repoPath)
+
+    if (existsSync(repoPath)) {
+      throw new Error('PROJECT_PATH_EXISTS')
+    }
+
+    await mkdir(repoPath, { recursive: true })
+
+    // Initialize git repository with a deterministic default branch.
+    try {
+      await git(['init', '-b', 'main'], repoPath)
+    } catch {
+      await git(['init'], repoPath)
+      await git(['branch', '-M', 'main'], repoPath).catch(() => {})
+    }
+
+    const readmePath = join(repoPath, 'README.md')
+    await writeFile(readmePath, `# ${projectName}\n`, 'utf-8')
+
+    await git(['add', 'README.md'], repoPath)
+
+    const author = await resolveCommitAuthorIdentity(repoPath, options.ownership)
+
+    try {
+      await git(
+        [
+          '-c', `user.name=${author.name}`,
+          '-c', `user.email=${author.email}`,
+          'commit',
+          '-m',
+          'chore: bootstrap repository',
+        ],
+        repoPath,
+      )
+    } catch (err) {
+      throw new Error(friendlyGitError(err, 'Failed to create initial commit'))
+    }
+
+    if (!options.createRemote) {
+      return { repoPath, branch: 'main' }
+    }
+
+    const visibility = options.visibility === 'public' ? 'public' : 'private'
+    const owner = (options.githubOwner?.trim() || (options.ownership === 'work' ? 'jleal-quintana' : 'juanilealb'))
+    const repoSlug = sanitizeGithubRepoName(projectName)
+    const remoteUrl = options.ownership === 'work'
+      ? `git@github.com:${owner}/${repoSlug}.git`
+      : `git@github-personal:${owner}/${repoSlug}.git`
+
+    try {
+      const createArgs = [
+        'repo',
+        'create',
+        `${owner}/${repoSlug}`,
+        visibility === 'public' ? '--public' : '--private',
+        '--confirm',
+      ]
+      await gh(createArgs, repoPath)
+    } catch (err) {
+      throw new Error(friendlyGhError(err, 'Failed to create GitHub repository'))
+    }
+
+    try {
+      if (await GitService.hasRemote(repoPath, 'origin')) {
+        await git(['remote', 'set-url', 'origin', remoteUrl], repoPath)
+      } else {
+        await git(['remote', 'add', 'origin', remoteUrl], repoPath)
+      }
+      await git(['push', '-u', 'origin', 'main'], repoPath)
+    } catch (err) {
+      throw new Error(friendlyGitError(err, 'GitHub repository created but failed to configure/push origin'))
+    }
+
+    return { repoPath, remoteUrl, branch: 'main' }
   }
 
   static async createWorktree(
@@ -326,6 +534,7 @@ export class GitService {
     const parentDir = dirname(repoPath)
     const repoName = basename(repoPath)
     const worktreePath = resolve(parentDir, `${repoName}-ws-${name}`)
+    const hasOrigin = await GitService.hasRemote(repoPath, 'origin')
 
     // Clean up stale worktree refs
     reportCreateWorktreeProgress(onProgress, {
@@ -334,12 +543,14 @@ export class GitService {
     })
     await git(['worktree', 'prune'], repoPath).catch(() => {})
 
-    // Fetch remote refs so worktree branches from latest state
-    reportCreateWorktreeProgress(onProgress, {
-      stage: 'fetch-origin',
-      message: 'Syncing remote...',
-    })
-    await git(['fetch', '--prune', 'origin'], repoPath)
+    if (hasOrigin) {
+      // Fetch remote refs so worktree branches from latest state
+      reportCreateWorktreeProgress(onProgress, {
+        stage: 'fetch-origin',
+        message: 'Syncing remote...',
+      })
+      await git(['fetch', '--prune', 'origin'], repoPath)
+    }
 
     // Auto-detect base branch when creating a new branch without explicit base
     if (newBranch && !baseBranch) {
@@ -372,8 +583,10 @@ export class GitService {
     // If checking out an existing branch that doesn't exist locally or on origin,
     // try fetching it as a GitHub PR branch (fork PRs aren't included in normal fetch)
     if (!newBranch && !branchExists) {
-      const remoteExists = await git(['rev-parse', '--verify', `refs/remotes/origin/${branch}`], repoPath)
-        .then(() => true, () => false)
+      const remoteExists = hasOrigin
+        ? await git(['rev-parse', '--verify', `refs/remotes/origin/${branch}`], repoPath)
+          .then(() => true, () => false)
+        : false
       if (!remoteExists) {
         try {
           const headCandidates = [requestedBranch]
@@ -389,7 +602,7 @@ export class GitService {
               // Resolve repo from cwd for broad gh CLI compatibility.
               'pr', 'list', '--head', headCandidate, '--json', 'number',
               '--jq', '.[0].number',
-            ], { cwd: repoPath })
+            ], { cwd: repoPath, windowsHide: true })
             prNumber = stdout.trim()
             if (prNumber) break
           }
@@ -425,7 +638,7 @@ export class GitService {
     }
 
     // Fast-forward existing branches to match upstream
-    if (!newBranch || branchExists) {
+    if (hasOrigin && (!newBranch || branchExists)) {
       reportCreateWorktreeProgress(onProgress, {
         stage: 'sync-branch',
         message: 'Fast-forwarding branch...',
@@ -569,7 +782,7 @@ export class GitService {
 
   static async getStatus(worktreePath: string): Promise<FileStatus[]> {
     const output = await git(
-      ['status', '--porcelain=v1', '-unormal'],
+      ['status', '--porcelain=v1', '-uall'],
       worktreePath
     )
     if (!output) return []
@@ -579,7 +792,10 @@ export class GitService {
     for (const line of output.split('\n')) {
       const indexStatus = line[0]
       const workStatus = line[1]
-      const path = line.slice(3).replace(/[\\/]+$/, '')
+      const path = line.slice(3)
+      if (isWindowsReservedPath(path)) {
+        continue
+      }
 
       if (indexStatus === '?' && workStatus === '?') {
         results.push({ path, status: 'untracked', staged: false })
@@ -682,11 +898,14 @@ export class GitService {
   }
 
   static async discard(worktreePath: string, paths: string[], untracked: string[]): Promise<void> {
-    if (paths.length > 0) {
-      await git(['checkout', '--', ...paths], worktreePath)
+    const safePaths = paths.filter((path) => !isWindowsReservedPath(path))
+    const safeUntracked = untracked.filter((path) => !isWindowsReservedPath(path))
+
+    if (safePaths.length > 0) {
+      await git(['checkout', '--', ...safePaths], worktreePath)
     }
-    if (untracked.length > 0) {
-      await git(['clean', '-f', '--', ...untracked], worktreePath)
+    if (safeUntracked.length > 0) {
+      await git(['clean', '-f', '--', ...safeUntracked], worktreePath)
     }
   }
 
@@ -769,7 +988,7 @@ export class GitService {
     }
   }
 
-  static async openOrCreatePullRequest(worktreePath: string): Promise<PullRequestResult> {
+  static async openOrCreatePullRequest(worktreePath: string, baseBranch?: string): Promise<PullRequestResult> {
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)
     if (!branch || branch === 'HEAD') {
       throw new Error('Cannot open pull request from detached HEAD')
@@ -777,11 +996,15 @@ export class GitService {
     if (branch === 'main' || branch === 'master') {
       throw new Error(`Cannot open pull request from ${branch}`)
     }
+    const normalizedBaseBranch = normalizeBranchName(baseBranch ?? '')
+    if (normalizedBaseBranch && normalizedBaseBranch === branch) {
+      throw new Error('PR base branch cannot be the same as source branch')
+    }
 
     await GitService.ensureGhAuthenticated(worktreePath)
     const { repoRef, headRef } = await GitService.resolvePrTarget(worktreePath, branch)
 
-    const existing = await GitService.findOpenPrUrl(worktreePath, headRef, undefined, repoRef)
+    const existing = await GitService.findOpenPrUrl(worktreePath, headRef, normalizedBaseBranch || undefined, repoRef)
     if (existing) {
       return { url: existing, created: false, branch }
     }
@@ -790,6 +1013,9 @@ export class GitService {
       const createArgs = ['pr', 'create']
       if (repoRef) createArgs.push('--repo', repoRef)
       createArgs.push('--fill', '--head', headRef)
+      if (normalizedBaseBranch) {
+        createArgs.push('--base', normalizedBaseBranch)
+      }
       const createdUrl = await gh(
         createArgs,
         worktreePath
@@ -798,7 +1024,12 @@ export class GitService {
       if (!url) throw new Error('Pull request created but URL was not returned')
       return { url, created: true, branch }
     } catch (err) {
-      const maybeExisting = await GitService.findOpenPrUrl(worktreePath, headRef, undefined, repoRef)
+      const maybeExisting = await GitService.findOpenPrUrl(
+        worktreePath,
+        headRef,
+        normalizedBaseBranch || undefined,
+        repoRef,
+      )
       if (maybeExisting) {
         return { url: maybeExisting, created: false, branch }
       }
@@ -956,3 +1187,4 @@ export class GitService {
     await git(['stash', 'drop', ref], worktreePath)
   }
 }
+

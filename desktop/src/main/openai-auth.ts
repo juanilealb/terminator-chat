@@ -178,6 +178,7 @@ function runCodexLogin(): Promise<void> {
     const child = spawn(binary, ['login'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
+      windowsHide: true,
     })
 
     let stdout = ''
