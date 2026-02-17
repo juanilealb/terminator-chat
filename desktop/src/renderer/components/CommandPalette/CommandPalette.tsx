@@ -1,9 +1,11 @@
-import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Input, Badge, Caption1 } from '@fluentui/react-components'
 import { SearchRegular } from '@fluentui/react-icons'
 import { useFocusTrap } from '../../hooks/useFocusTrap'
 import { useAppStore } from '../../store/app-store'
 import { expandPromptTemplate } from '../../utils/prompt-template'
+import { routeExpandedTemplateToChat } from '../../utils/template-routing'
+import { dispatchGitStatusChanged } from '../../utils/git-status-events'
 import styles from './CommandPalette.module.css'
 
 interface CommandAction {
@@ -46,6 +48,15 @@ export function CommandPalette() {
   } = useAppStore()
 
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId)
+
+  const refreshWorkspaceStatusCount = useCallback(async (worktreePath: string): Promise<void> => {
+    try {
+      const statuses = await window.api.git.getStatus(worktreePath)
+      dispatchGitStatusChanged(worktreePath, statuses.length)
+    } catch {
+      // Ignore status sync errors in command palette actions.
+    }
+  }, [])
 
   const ensureRightPanelMode = (mode: 'files' | 'changes' | 'memory') => {
     setRightPanelMode(mode)
@@ -146,6 +157,7 @@ export function CommandPalette() {
             addToast({ id: crypto.randomUUID(), message: 'No local changes to snapshot', type: 'info' })
             return
           }
+          await refreshWorkspaceStatusCount(workspace.worktreePath)
           addToast({ id: crypto.randomUUID(), message: `Snapshot created: ${created.label}`, type: 'info' })
         },
       })
@@ -164,6 +176,7 @@ export function CommandPalette() {
             return
           }
           await window.api.git.restoreSnapshot(workspace.worktreePath, latest.ref)
+          await refreshWorkspaceStatusCount(workspace.worktreePath)
           addToast({ id: crypto.randomUUID(), message: `Snapshot restored: ${latest.label}`, type: 'info' })
         },
       })
@@ -179,7 +192,13 @@ export function CommandPalette() {
         shortcut: '/template',
         run: async () => {
           const expanded = await expandPromptTemplate(template.content, workspace)
-          addToast({ id: crypto.randomUUID(), message: `Template "${template.name}" expanded (${expanded.length} chars)`, type: 'info' })
+          await routeExpandedTemplateToChat({
+            workspace,
+            templateName: template.name,
+            expandedPrompt: expanded,
+            focusOrCreateChat,
+            addToast,
+          })
         },
       })
     }
@@ -195,6 +214,7 @@ export function CommandPalette() {
     toggleSidebar,
     addToast,
     rightPanelOpen,
+    refreshWorkspaceStatusCount,
   ])
 
   const filtered = useMemo(() => {
@@ -246,6 +266,7 @@ export function CommandPalette() {
         addToast({ id: crypto.randomUUID(), message: 'No local changes to snapshot', type: 'info' })
         return true
       }
+      await refreshWorkspaceStatusCount(workspace.worktreePath)
       addToast({ id: crypto.randomUUID(), message: `Snapshot created: ${created.label}`, type: 'info' })
       return true
     }
@@ -261,6 +282,7 @@ export function CommandPalette() {
         return true
       }
       await window.api.git.restoreSnapshot(workspace.worktreePath, latest.ref)
+      await refreshWorkspaceStatusCount(workspace.worktreePath)
       addToast({ id: crypto.randomUUID(), message: `Snapshot restored: ${latest.label}`, type: 'info' })
       return true
     }
@@ -275,7 +297,13 @@ export function CommandPalette() {
         return true
       }
       const expanded = await expandPromptTemplate(template.content, workspace)
-      addToast({ id: crypto.randomUUID(), message: `Template "${template.name}" expanded (${expanded.length} chars)`, type: 'info' })
+      await routeExpandedTemplateToChat({
+        workspace,
+        templateName: template.name,
+        expandedPrompt: expanded,
+        focusOrCreateChat,
+        addToast,
+      })
       return true
     }
     if (command === 'help') {

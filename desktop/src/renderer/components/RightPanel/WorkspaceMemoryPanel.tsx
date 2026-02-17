@@ -8,6 +8,8 @@ import {
 import type { Workspace } from '../../store/types'
 import { useAppStore } from '../../store/app-store'
 import { expandPromptTemplate } from '../../utils/prompt-template'
+import { routeExpandedTemplateToChat } from '../../utils/template-routing'
+import { dispatchGitStatusChanged } from '../../utils/git-status-events'
 import styles from './RightPanel.module.css'
 
 interface Snapshot {
@@ -32,11 +34,21 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
     addToast,
     showConfirmDialog,
     dismissConfirmDialog,
+    focusOrCreateChat,
   } = useAppStore()
 
   const [snapshotLabel, setSnapshotLabel] = useState('')
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loadingSnapshots, setLoadingSnapshots] = useState(false)
+
+  const refreshGitStatusCount = useCallback(async () => {
+    try {
+      const statuses = await window.api.git.getStatus(workspace.worktreePath)
+      dispatchGitStatusChanged(workspace.worktreePath, statuses.length)
+    } catch {
+      // Ignore status sync failures from the memory panel.
+    }
+  }, [workspace.worktreePath])
 
   const refreshSnapshots = useCallback(async () => {
     setLoadingSnapshots(true)
@@ -57,14 +69,21 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
 
   const applyTemplate = useCallback(
     async (templateName: string, templateContent: string) => {
-      const expanded = await expandPromptTemplate(templateContent, workspace)
-      addToast({
-        id: crypto.randomUUID(),
-        message: `Template "${templateName}" expanded (${expanded.length} chars)`,
-        type: 'info',
-      })
+      try {
+        const expanded = await expandPromptTemplate(templateContent, workspace)
+        await routeExpandedTemplateToChat({
+          workspace,
+          templateName,
+          expandedPrompt: expanded,
+          focusOrCreateChat,
+          addToast,
+        })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : `Failed to apply template "${templateName}"`
+        addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
+      }
     },
-    [addToast, workspace]
+    [workspace, focusOrCreateChat, addToast]
   )
 
   const handleCreateSnapshot = useCallback(async () => {
@@ -85,11 +104,12 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
         type: 'info',
       })
       await refreshSnapshots()
+      await refreshGitStatusCount()
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to create snapshot'
       addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
     }
-  }, [workspace.worktreePath, snapshotLabel, refreshSnapshots, addToast])
+  }, [workspace.worktreePath, snapshotLabel, refreshSnapshots, refreshGitStatusCount, addToast])
 
   const restoreSnapshot = useCallback(
     (snapshot: Snapshot) => {
@@ -107,6 +127,8 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
               message: `Snapshot restored: ${snapshot.label}`,
               type: 'info',
             })
+            await refreshSnapshots()
+            await refreshGitStatusCount()
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to restore snapshot'
             addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
@@ -114,7 +136,7 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
         },
       })
     },
-    [workspace.worktreePath, showConfirmDialog, dismissConfirmDialog, addToast]
+    [workspace.worktreePath, showConfirmDialog, dismissConfirmDialog, addToast, refreshSnapshots, refreshGitStatusCount]
   )
 
   const deleteSnapshot = useCallback(
@@ -134,6 +156,7 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
               type: 'info',
             })
             await refreshSnapshots()
+            await refreshGitStatusCount()
           } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to delete snapshot'
             addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
@@ -141,7 +164,7 @@ export function WorkspaceMemoryPanel({ workspace }: Props) {
         },
       })
     },
-    [workspace.worktreePath, showConfirmDialog, dismissConfirmDialog, refreshSnapshots, addToast]
+    [workspace.worktreePath, showConfirmDialog, dismissConfirmDialog, refreshSnapshots, refreshGitStatusCount, addToast]
   )
 
   return (

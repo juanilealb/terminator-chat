@@ -144,30 +144,35 @@ export function DiffViewer({ worktreePath, active }: Props) {
       const statuses: FileStatus[] = await window.api.git.getStatus(worktreePath)
       const results = await Promise.all(
         statuses.map(async (file) => {
-          let patch = await window.api.git.getFileDiff(worktreePath, file.path)
+          try {
+            let patch = await window.api.git.getFileDiff(worktreePath, file.path)
 
-          // For added/untracked files, git diff returns empty — build synthetic patch
-          if (!patch && (file.status === 'added' || file.status === 'untracked')) {
-            const fullPath = joinWorktreePath(worktreePath, file.path)
-            const content = await window.api.fs.readFile(fullPath)
-            const lines = content.split('\n')
-            patch = [
-              `--- /dev/null`,
-              `+++ b/${file.path}`,
-              `@@ -0,0 +1,${lines.length} @@`,
-              ...lines.map((l: string) => `+${l}`),
-            ].join('\n')
+            // For added/untracked files, git diff returns empty — build synthetic patch
+            if (!patch && (file.status === 'added' || file.status === 'untracked')) {
+              const fullPath = joinWorktreePath(worktreePath, file.path)
+              const content = await window.api.fs.readFile(fullPath)
+              const lines = content.split('\n')
+              patch = [
+                `--- /dev/null`,
+                `+++ b/${file.path}`,
+                `@@ -0,0 +1,${lines.length} @@`,
+                ...lines.map((l: string) => `+${l}`),
+              ].join('\n')
+            }
+
+            // For deleted files with no diff, build synthetic removal patch
+            if (!patch && file.status === 'deleted') {
+              patch = `--- a/${file.path}\n+++ /dev/null\n@@ -1,0 +0,0 @@\n`
+            }
+
+            return { filePath: toPosixPath(file.path), patch: patch || '', status: file.status }
+          } catch (error) {
+            console.warn('Skipping diff entry due read/parsing error', { filePath: file.path, error })
+            return null
           }
-
-          // For deleted files with no diff, build synthetic removal patch
-          if (!patch && file.status === 'deleted') {
-            patch = `--- a/${file.path}\n+++ /dev/null\n@@ -1,0 +0,0 @@\n`
-          }
-
-          return { filePath: toPosixPath(file.path), patch: patch || '', status: file.status }
         }),
       )
-      setFiles(results)
+      setFiles(results.filter((entry): entry is DiffFileData => entry !== null))
     } catch (err) {
       console.error('Failed to load diffs:', err)
     } finally {
