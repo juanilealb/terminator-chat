@@ -1,78 +1,95 @@
 import { test, expect, _electron as electron, ElectronApplication, Page } from '@playwright/test'
 import { resolve, join } from 'path'
 import { mkdirSync, writeFileSync } from 'fs'
-import { execSync } from 'child_process'
 import { tmpdir } from 'os'
 
 const appPath = resolve(__dirname, '../out/main/index.js')
-const NOTIFY_DIR = join(tmpdir(), 'terminator-notify')
+const NOTIFY_DIR = join(tmpdir(), 'terminator-chat-notify')
 
 async function launchApp(): Promise<{ app: ElectronApplication; window: Page }> {
   const app = await electron.launch({ args: [appPath], env: { ...process.env, CI_TEST: '1' } })
   const window = await app.firstWindow()
   await window.waitForLoadState('domcontentloaded')
   await window.waitForSelector('#root', { timeout: 10000 })
-  await window.waitForTimeout(1500)
+  await window.waitForTimeout(1000)
   return { app, window }
 }
 
-function createTestRepo(name: string): string {
-  const stamp = `${name}-${Date.now()}`
-  const repoPath = join(tmpdir(), `test-repo-${stamp}`)
-  const remotePath = join(tmpdir(), `test-remote-${stamp}.git`)
+function createWorkspaceFixture(name: string): {
+  repoPath: string
+  ws1Path: string
+  ws2Path: string
+} {
+  const base = join(tmpdir(), `tc-unread-${name}-${Date.now()}`)
+  const repoPath = join(base, 'repo')
+  const ws1Path = join(base, 'ws-1')
+  const ws2Path = join(base, 'ws-2')
   mkdirSync(repoPath, { recursive: true })
-  execSync('git init', { cwd: repoPath })
-  execSync('git checkout -b main', { cwd: repoPath })
-  writeFileSync(join(repoPath, 'README.md'), '# Test Repo\n')
-  execSync('git add .', { cwd: repoPath })
-  execSync('git commit -m "initial commit"', { cwd: repoPath })
-  execSync(`git init --bare "${remotePath}"`)
-  execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath })
-  execSync('git -c core.hooksPath=/dev/null push -u origin main', { cwd: repoPath })
-  return repoPath
+  mkdirSync(ws1Path, { recursive: true })
+  mkdirSync(ws2Path, { recursive: true })
+  return { repoPath, ws1Path, ws2Path }
 }
 
-/** Set up two workspaces with terminals. Returns both workspace IDs. Active workspace is ws2. */
-async function setupTwoWorkspaces(window: Page, repoPath: string) {
-  return await window.evaluate(async (repo: string) => {
+async function setupTwoWorkspaces(window: Page, paths: { repoPath: string; ws1Path: string; ws2Path: string }) {
+  return await window.evaluate(async ({ repoPath, ws1Path, ws2Path }) => {
     const store = (window as any).__store.getState()
-    store.hydrateState({ projects: [], workspaces: [] })
+    store.hydrateState({ projects: [], workspaces: [], tabs: [] })
 
     const projectId = crypto.randomUUID()
-    store.addProject({ id: projectId, name: 'test-repo', repoPath: repo })
+    store.addProject({
+      id: projectId,
+      name: 'test-repo',
+      repoPath,
+      ownership: 'personal',
+    })
 
-    // Workspace 1
-    const wt1 = await (window as any).api.git.createWorktree(repo, 'ws-1', 'branch-1', true)
     const ws1Id = crypto.randomUUID()
-    store.addWorkspace({ id: ws1Id, name: 'ws-1', branch: 'branch-1', worktreePath: wt1, projectId })
-    const pty1Id = await (window as any).api.pty.create(wt1, undefined, undefined, { AGENT_ORCH_WS_ID: ws1Id })
-    store.addTab({ id: crypto.randomUUID(), workspaceId: ws1Id, type: 'terminal', title: 'Terminal', ptyId: pty1Id })
+    store.addWorkspace({
+      id: ws1Id,
+      name: 'ws-1',
+      type: 'feature',
+      branch: 'branch-1',
+      worktreePath: ws1Path,
+      projectId,
+      agentPermissionMode: 'default',
+      memory: '',
+    })
+    const ws1TabId = crypto.randomUUID()
+    store.addTab({
+      id: ws1TabId,
+      workspaceId: ws1Id,
+      type: 'chat',
+      title: 'Thread 1',
+      threadId: crypto.randomUUID(),
+    })
 
-    // Workspace 2 (becomes active since addWorkspace sets active)
-    const wt2 = await (window as any).api.git.createWorktree(repo, 'ws-2', 'branch-2', true)
     const ws2Id = crypto.randomUUID()
-    store.addWorkspace({ id: ws2Id, name: 'ws-2', branch: 'branch-2', worktreePath: wt2, projectId })
-    const pty2Id = await (window as any).api.pty.create(wt2, undefined, undefined, { AGENT_ORCH_WS_ID: ws2Id })
-    store.addTab({ id: crypto.randomUUID(), workspaceId: ws2Id, type: 'terminal', title: 'Terminal', ptyId: pty2Id })
+    store.addWorkspace({
+      id: ws2Id,
+      name: 'ws-2',
+      type: 'feature',
+      branch: 'branch-2',
+      worktreePath: ws2Path,
+      projectId,
+      agentPermissionMode: 'default',
+      memory: '',
+    })
+    const ws2TabId = crypto.randomUUID()
+    store.addTab({
+      id: ws2TabId,
+      workspaceId: ws2Id,
+      type: 'chat',
+      title: 'Thread 2',
+      threadId: crypto.randomUUID(),
+    })
+
+    store.setActiveWorkspace(ws2Id)
+    store.setActiveTab(ws2TabId)
 
     return { ws1Id, ws2Id }
-  }, repoPath)
+  }, paths)
 }
 
-/** Set up the IPC listener from the test context (mirrors what App.tsx useEffect does) */
-async function setupNotifyListener(window: Page) {
-  await window.evaluate(() => {
-    ;(window as any).api.claude.onNotifyWorkspace((event: { workspaceId: string }) => {
-      const state = (window as any).__store.getState()
-      const wsId = event.workspaceId
-      if (wsId !== state.activeWorkspaceId) {
-        state.markWorkspaceUnread(wsId)
-      }
-    })
-  })
-}
-
-/** Write a signal file to the notification directory, simulating what the hook script does */
 function writeSignalFile(workspaceId: string): void {
   mkdirSync(NOTIFY_DIR, { recursive: true })
   writeFileSync(join(NOTIFY_DIR, `test-${Date.now()}-${Math.random()}`), workspaceId)
@@ -80,86 +97,69 @@ function writeSignalFile(workspaceId: string): void {
 
 test.describe('Unread indicator', () => {
   test('notification signal marks non-active workspace as unread', async () => {
-    const repoPath = createTestRepo('unread-1')
+    const fixture = createWorkspaceFixture('set-unread')
     const { app, window } = await launchApp()
 
     try {
-      const { ws1Id } = await setupTwoWorkspaces(window, repoPath)
-      await setupNotifyListener(window)
-      await window.waitForTimeout(500)
+      const { ws1Id } = await setupTwoWorkspaces(window, fixture)
+      await window.waitForTimeout(700)
 
-      // ws2 is active, write signal file for ws1
       writeSignalFile(ws1Id)
 
-      // Wait for watcher poll (500ms interval) + IPC delivery
       await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(wsId),
+        (workspaceId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(workspaceId),
         ws1Id,
-        { timeout: 5000 }
+        { timeout: 7000 },
       )
-
-      const isUnread = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().unreadWorkspaceIds.has(wsId)
-      }, ws1Id)
-      expect(isUnread).toBe(true)
     } finally {
       await app.close()
     }
   })
 
-  test('switching to unread workspace dismisses indicator', async () => {
-    const repoPath = createTestRepo('unread-2')
+  test('switching to unread workspace clears indicator', async () => {
+    const fixture = createWorkspaceFixture('clear-unread')
     const { app, window } = await launchApp()
 
     try {
-      const { ws1Id } = await setupTwoWorkspaces(window, repoPath)
-      await setupNotifyListener(window)
-      await window.waitForTimeout(500)
-
-      // Write signal for ws1 (non-active)
+      const { ws1Id } = await setupTwoWorkspaces(window, fixture)
+      await window.waitForTimeout(700)
       writeSignalFile(ws1Id)
 
-      // Wait for unread to be set
       await window.waitForFunction(
-        (wsId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(wsId),
+        (workspaceId: string) => (window as any).__store.getState().unreadWorkspaceIds.has(workspaceId),
         ws1Id,
-        { timeout: 3000 }
+        { timeout: 7000 },
       )
 
-      // Switch to ws1
-      await window.evaluate((wsId: string) => {
-        ;(window as any).__store.getState().setActiveWorkspace(wsId)
+      await window.evaluate((workspaceId: string) => {
+        ;(window as any).__store.getState().setActiveWorkspace(workspaceId)
       }, ws1Id)
-      await window.waitForTimeout(500)
 
-      // Unread should be cleared
-      const isUnreadAfter = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().unreadWorkspaceIds.has(wsId)
-      }, ws1Id)
-      expect(isUnreadAfter).toBe(false)
+      await window.waitForFunction(
+        (workspaceId: string) => !(window as any).__store.getState().unreadWorkspaceIds.has(workspaceId),
+        ws1Id,
+        { timeout: 5000 },
+      )
     } finally {
       await app.close()
     }
   })
 
-  test('notification for active workspace does not show indicator', async () => {
-    const repoPath = createTestRepo('unread-3')
+  test('notification for active workspace does not show unread indicator', async () => {
+    const fixture = createWorkspaceFixture('active-no-unread')
     const { app, window } = await launchApp()
 
     try {
-      const { ws2Id } = await setupTwoWorkspaces(window, repoPath)
-      await setupNotifyListener(window)
-      await window.waitForTimeout(500)
+      const { ws2Id } = await setupTwoWorkspaces(window, fixture)
+      await window.waitForTimeout(700)
 
-      // ws2 is active — write signal for ws2
       writeSignalFile(ws2Id)
       await window.waitForTimeout(1500)
 
-      // ws2 should NOT be marked as unread
-      const isUnread = await window.evaluate((wsId: string) => {
-        return (window as any).__store.getState().unreadWorkspaceIds.has(wsId)
+      const hasUnread = await window.evaluate((workspaceId: string) => {
+        return (window as any).__store.getState().unreadWorkspaceIds.has(workspaceId)
       }, ws2Id)
-      expect(isUnread).toBe(false)
+      expect(hasUnread).toBe(false)
     } finally {
       await app.close()
     }

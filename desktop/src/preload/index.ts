@@ -127,6 +127,19 @@ const api = {
       ipcRenderer.invoke(IPC.APP_SELECT_DIRECTORY),
     addProjectPath: (dirPath: string) =>
       ipcRenderer.invoke(IPC.APP_ADD_PROJECT_PATH, dirPath),
+    createProject: (input: {
+      parentDir: string
+      projectName: string
+      ownership: 'personal' | 'work'
+      createRemote?: boolean
+      visibility?: 'public' | 'private'
+      githubOwner?: string
+    }) =>
+      ipcRenderer.invoke(IPC.APP_CREATE_PROJECT, input) as Promise<{
+        repoPath: string
+        remoteUrl?: string
+        branch: string
+      }>,
     getDataPath: () =>
       ipcRenderer.invoke(IPC.APP_GET_DATA_PATH),
     setUnreadCount: (count: number) =>
@@ -283,8 +296,9 @@ const api = {
         approvalMode?: 'never' | 'on-request' | 'on-failure' | 'untrusted'
       },
       workspaceId?: string,
+      workspaceLabel?: string,
     ) =>
-      ipcRenderer.invoke(IPC.CHAT_CREATE_THREAD, workingDir, model, effort, options, workspaceId) as Promise<string>,
+      ipcRenderer.invoke(IPC.CHAT_CREATE_THREAD, workingDir, model, effort, options, workspaceId, workspaceLabel) as Promise<string>,
     send: (threadId: string, input: string | Array<{ type: string; text?: string; path?: string }>) =>
       ipcRenderer.invoke(IPC.CHAT_SEND, threadId, input) as Promise<{ accepted: true; turnId: string }>,
     cancel: (threadId: string) =>

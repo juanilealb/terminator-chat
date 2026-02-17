@@ -29,6 +29,7 @@ export type CodexThreadOptions = {
 interface ThreadContext {
   thread: any
   workspaceId: string | null
+  workspaceLabel: string | null
   turnSequence: number
 }
 
@@ -57,6 +58,7 @@ export class CodexService {
     effort?: string,
     threadOptions?: CodexThreadOptions,
     workspaceId?: string,
+    workspaceLabel?: string,
   ): string {
     if (!this.codex) throw new Error('Not logged in. Sign in with your ChatGPT account first.')
     const opts: Record<string, unknown> = {
@@ -72,6 +74,7 @@ export class CodexService {
     this.threads.set(id, {
       thread,
       workspaceId: workspaceId ?? null,
+      workspaceLabel: workspaceLabel?.trim() || null,
       turnSequence: 0,
     })
     return id
@@ -113,7 +116,7 @@ export class CodexService {
     input: CodexUserInput,
     win: BrowserWindow,
   ): Promise<void> {
-    const { thread, workspaceId } = context
+    const { thread, workspaceId, workspaceLabel } = context
     const normalizedWorkspaceId = workspaceId ?? undefined
     const waitingNotified = { value: false }
     let emittedTerminalPhase = false
@@ -132,7 +135,7 @@ export class CodexService {
 
       if (!workspaceId) return
       if (type === 'turn.completed') {
-        notifyWorkspace(workspaceId, 'completed', { turnId, source: 'chat' })
+        notifyWorkspace(workspaceId, 'completed', { turnId, source: 'chat', workspaceLabel: workspaceLabel ?? undefined })
       }
     }
 
@@ -147,7 +150,7 @@ export class CodexService {
         phase: 'turn.waiting_input',
         data: { type: 'turn.waiting_input' },
       })
-      notifyWorkspace(workspaceId, 'waiting_input', { turnId, source: 'chat' })
+      notifyWorkspace(workspaceId, 'waiting_input', { turnId, source: 'chat', workspaceLabel: workspaceLabel ?? undefined })
     }
 
     const controller = new AbortController()

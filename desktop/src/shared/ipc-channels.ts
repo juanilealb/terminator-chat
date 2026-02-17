@@ -11,6 +11,7 @@ export interface AgentNotifyEvent {
   notifyId: string
   ts: number
   workspaceId: string
+  workspaceLabel?: string
   reason: AgentNotifyReason
   turnId?: string
   source?: 'hook' | 'chat'
@@ -85,6 +86,7 @@ export const IPC = {
   // App operations
   APP_SELECT_DIRECTORY: 'app:select-directory',
   APP_ADD_PROJECT_PATH: 'app:add-project-path',
+  APP_CREATE_PROJECT: 'app:create-project',
   APP_GET_DATA_PATH: 'app:get-data-path',
   APP_SET_UNREAD_COUNT: 'app:set-unread-count',
   APP_SET_ACTIVE_WORKSPACE: 'app:set-active-workspace',
