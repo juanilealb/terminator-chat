@@ -8,6 +8,7 @@ import {
   type ChatUsage,
 } from '../shared/ipc-channels'
 import { notifyWorkspace } from './agent-notifier'
+import { resolveBundledCodexBinaryPath } from './openai-auth'
 
 // Lazy-import the SDK so that if it fails to load (e.g. on Windows where the
 // codex binary may not exist) the rest of the main process still works.
@@ -52,7 +53,8 @@ export class CodexService {
       return
     }
     await ensureSdk()
-    this.codex = new Codex()
+    const codexPathOverride = resolveBundledCodexBinaryPath() ?? undefined
+    this.codex = new Codex(codexPathOverride ? { codexPathOverride } : undefined)
   }
 
   isReady(): boolean {

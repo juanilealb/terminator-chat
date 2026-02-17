@@ -1,5 +1,5 @@
 import { readFileSync, unlinkSync, existsSync } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { spawn } from 'child_process'
 
@@ -111,7 +111,11 @@ export async function refreshIfNeeded(): Promise<string> {
 /**
  * Find the Codex CLI binary bundled with @openai/codex.
  */
-function findCodexBinary(): string | null {
+function toUnpackedAsarPath(candidate: string): string {
+  return candidate.replace(/app\.asar([\\/])/gi, 'app.asar.unpacked$1')
+}
+
+export function resolveBundledCodexBinaryPath(): string | null {
   const platform = process.platform
   const arch = process.arch
 
@@ -141,18 +145,24 @@ function findCodexBinary(): string | null {
   const binaryName = platform === 'win32' ? 'codex.exe' : 'codex'
 
   // Try common node_modules locations
-  const candidates = [
+  const baseCandidates = [
     join(__dirname, '..', '..', 'node_modules', packageName, 'vendor', target, 'codex', binaryName),
     join(__dirname, '..', '..', '..', 'node_modules', packageName, 'vendor', target, 'codex', binaryName),
   ]
+  const candidates = [...baseCandidates]
 
   // Also try require.resolve
   try {
     const pkgJson = require.resolve(`${packageName}/package.json`)
-    const pkgDir = join(pkgJson, '..')
+    const pkgDir = dirname(pkgJson)
     candidates.unshift(join(pkgDir, 'vendor', target, 'codex', binaryName))
   } catch {
     // package not installed
+  }
+
+  for (const candidate of [...candidates]) {
+    const unpacked = toUnpackedAsarPath(candidate)
+    if (unpacked !== candidate) candidates.unshift(unpacked)
   }
 
   for (const candidate of candidates) {
@@ -168,7 +178,7 @@ function findCodexBinary(): string | null {
  */
 function runCodexLogin(): Promise<void> {
   return new Promise((resolve, reject) => {
-    const binary = findCodexBinary()
+    const binary = resolveBundledCodexBinaryPath()
     if (!binary) {
       reject(new Error('Codex CLI binary not found. Install @openai/codex package.'))
       return
