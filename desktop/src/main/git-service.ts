@@ -72,6 +72,11 @@ export interface CreateProjectRepoResult {
   branch: string
 }
 
+interface CommitAuthorIdentity {
+  name: string
+  email: string
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFileAsync('git', args, {
     cwd,
@@ -88,6 +93,47 @@ async function gh(args: string[], cwd: string): Promise<string> {
     windowsHide: true,
   })
   return stdout.trim()
+}
+
+async function gitConfigGet(cwd: string, key: string, scope: '--local' | '--global'): Promise<string> {
+  try {
+    const value = await git(['config', scope, '--get', key], cwd)
+    return value.trim()
+  } catch {
+    return ''
+  }
+}
+
+function fallbackAuthorIdentity(ownership: 'personal' | 'work'): CommitAuthorIdentity {
+  if (ownership === 'work') {
+    return {
+      name: 'jleal-quintana',
+      email: 'jleal@quintanaep.com',
+    }
+  }
+  return {
+    name: 'juanilealb',
+    email: '126987726+juanilealb@users.noreply.github.com',
+  }
+}
+
+async function resolveCommitAuthorIdentity(
+  cwd: string,
+  ownership: 'personal' | 'work',
+): Promise<CommitAuthorIdentity> {
+  const localName = await gitConfigGet(cwd, 'user.name', '--local')
+  const localEmail = await gitConfigGet(cwd, 'user.email', '--local')
+  if (localName && localEmail) {
+    return { name: localName, email: localEmail }
+  }
+
+  const globalName = await gitConfigGet(cwd, 'user.name', '--global')
+  const globalEmail = await gitConfigGet(cwd, 'user.email', '--global')
+  if (globalName && globalEmail) {
+    return { name: globalName, email: globalEmail }
+  }
+
+  return fallbackAuthorIdentity(ownership)
 }
 
 /** Extract a user-friendly message from a git exec error */
@@ -152,6 +198,14 @@ function friendlyGhError(err: unknown, fallback: string): string {
   }
 
   return stderr.split('\n').find((line) => line.trim())?.trim() ?? fallback
+}
+
+function normalizeBranchName(value: string): string {
+  return value
+    .trim()
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^origin\//, '')
 }
 
 function isAlreadyMissingWorktreeError(err: unknown): boolean {
@@ -409,16 +463,13 @@ export class GitService {
 
     await git(['add', 'README.md'], repoPath)
 
-    const authorName = options.ownership === 'work' ? 'jleal-quintana' : 'juanilealb'
-    const authorEmail = options.ownership === 'work'
-      ? 'jleal@quintanaep.com'
-      : '126987726+juanilealb@users.noreply.github.com'
+    const author = await resolveCommitAuthorIdentity(repoPath, options.ownership)
 
     try {
       await git(
         [
-          '-c', `user.name=${authorName}`,
-          '-c', `user.email=${authorEmail}`,
+          '-c', `user.name=${author.name}`,
+          '-c', `user.email=${author.email}`,
           'commit',
           '-m',
           'chore: bootstrap repository',
@@ -937,7 +988,7 @@ export class GitService {
     }
   }
 
-  static async openOrCreatePullRequest(worktreePath: string): Promise<PullRequestResult> {
+  static async openOrCreatePullRequest(worktreePath: string, baseBranch?: string): Promise<PullRequestResult> {
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)
     if (!branch || branch === 'HEAD') {
       throw new Error('Cannot open pull request from detached HEAD')
@@ -945,11 +996,15 @@ export class GitService {
     if (branch === 'main' || branch === 'master') {
       throw new Error(`Cannot open pull request from ${branch}`)
     }
+    const normalizedBaseBranch = normalizeBranchName(baseBranch ?? '')
+    if (normalizedBaseBranch && normalizedBaseBranch === branch) {
+      throw new Error('PR base branch cannot be the same as source branch')
+    }
 
     await GitService.ensureGhAuthenticated(worktreePath)
     const { repoRef, headRef } = await GitService.resolvePrTarget(worktreePath, branch)
 
-    const existing = await GitService.findOpenPrUrl(worktreePath, headRef, undefined, repoRef)
+    const existing = await GitService.findOpenPrUrl(worktreePath, headRef, normalizedBaseBranch || undefined, repoRef)
     if (existing) {
       return { url: existing, created: false, branch }
     }
@@ -958,6 +1013,9 @@ export class GitService {
       const createArgs = ['pr', 'create']
       if (repoRef) createArgs.push('--repo', repoRef)
       createArgs.push('--fill', '--head', headRef)
+      if (normalizedBaseBranch) {
+        createArgs.push('--base', normalizedBaseBranch)
+      }
       const createdUrl = await gh(
         createArgs,
         worktreePath
@@ -966,7 +1024,12 @@ export class GitService {
       if (!url) throw new Error('Pull request created but URL was not returned')
       return { url, created: true, branch }
     } catch (err) {
-      const maybeExisting = await GitService.findOpenPrUrl(worktreePath, headRef, undefined, repoRef)
+      const maybeExisting = await GitService.findOpenPrUrl(
+        worktreePath,
+        headRef,
+        normalizedBaseBranch || undefined,
+        repoRef,
+      )
       if (maybeExisting) {
         return { url: maybeExisting, created: false, branch }
       }

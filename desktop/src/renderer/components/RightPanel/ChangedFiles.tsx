@@ -43,7 +43,13 @@ const STATUS_LABELS: Record<string, string> = {
   untracked: 'U',
 }
 
-type CommitFlowAction = 'commit' | 'ship-main' | 'ship-main-close'
+type CommitFlowAction =
+  | 'commit'
+  | 'commit-push'
+  | 'commit-pr'
+  | 'commit-pr-target'
+  | 'ship-main'
+  | 'ship-main-close'
 
 interface CommitFlowOption {
   id: CommitFlowAction
@@ -56,6 +62,21 @@ const COMMIT_FLOW_OPTIONS: CommitFlowOption[] = [
     id: 'commit',
     label: 'Commit',
     tooltip: 'Commit changes',
+  },
+  {
+    id: 'commit-push',
+    label: 'Commit and push',
+    tooltip: 'Commit and push current branch',
+  },
+  {
+    id: 'commit-pr',
+    label: 'Commit, push and PR',
+    tooltip: 'Commit, push branch, and open or create a pull request',
+  },
+  {
+    id: 'commit-pr-target',
+    label: 'Commit, push and PR to target',
+    tooltip: 'Commit, push branch, and open or create a pull request to a selected base branch',
   },
   {
     id: 'ship-main',
@@ -89,12 +110,24 @@ function formatUserError(err: unknown, fallback: string): string {
   return err.message.replace(invokePrefix, '') || fallback
 }
 
+function normalizeBranchName(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) return ''
+  return trimmed
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^origin\//, '')
+}
+
 export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
   const [files, setFiles] = useState<FileStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [commitMsg, setCommitMsg] = useState('')
   const [commitFlow, setCommitFlow] = useState<CommitFlowAction>('commit')
+  const [availableBaseBranches, setAvailableBaseBranches] = useState<string[]>([])
+  const [selectedBaseBranch, setSelectedBaseBranch] = useState('')
+  const [defaultBaseBranch, setDefaultBaseBranch] = useState('main')
   const refreshSeqRef = useRef(0)
   const lastAutofilledCommitMsgRef = useRef<string>('')
   const {
@@ -118,6 +151,48 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
       return prev
     })
   }, [defaultCommitPrefix, workspaceId])
+
+  useEffect(() => {
+    if (!project) {
+      setAvailableBaseBranches([])
+      setSelectedBaseBranch('')
+      setDefaultBaseBranch('main')
+      return
+    }
+
+    let cancelled = false
+    void Promise.all([
+      window.api.git.getBranches(project.repoPath).catch(() => [] as string[]),
+      window.api.git.getDefaultBranch(project.repoPath).catch(() => 'main'),
+      window.api.git.getCurrentBranch(worktreePath).catch(() => ''),
+    ]).then(([branches, defaultBranchRaw, currentBranchRaw]) => {
+      if (cancelled) return
+      const currentBranch = normalizeBranchName(currentBranchRaw)
+      const normalizedDefault = normalizeBranchName(defaultBranchRaw) || 'main'
+      const uniqueBranches = Array.from(
+        new Set(
+          branches
+            .map((entry) => normalizeBranchName(entry))
+            .filter((entry) => !!entry && entry !== currentBranch),
+        ),
+      )
+      uniqueBranches.sort((a, b) => a.localeCompare(b))
+      if (normalizedDefault && !uniqueBranches.includes(normalizedDefault)) {
+        uniqueBranches.unshift(normalizedDefault)
+      }
+
+      setDefaultBaseBranch(normalizedDefault)
+      setAvailableBaseBranches(uniqueBranches)
+      setSelectedBaseBranch((prev) => {
+        if (prev && uniqueBranches.includes(prev)) return prev
+        return normalizedDefault || uniqueBranches[0] || ''
+      })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [project, worktreePath])
 
   const lastRefreshRef = useRef(0)
 
@@ -221,6 +296,51 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
       }
       await window.api.git.commit(worktreePath, message)
 
+      if (commitFlow === 'commit') {
+        addToast({
+          id: crypto.randomUUID(),
+          message: 'Commit created',
+          type: 'info',
+        })
+        lastAutofilledCommitMsgRef.current = defaultCommitPrefix
+        setCommitMsg(defaultCommitPrefix)
+        return
+      }
+
+      if (commitFlow === 'commit-push') {
+        const pushed = await window.api.git.pushCurrentBranch(worktreePath)
+        addToast({
+          id: crypto.randomUUID(),
+          message: `Committed and pushed ${pushed.branch}.`,
+          type: 'info',
+        })
+        lastAutofilledCommitMsgRef.current = defaultCommitPrefix
+        setCommitMsg(defaultCommitPrefix)
+        return
+      }
+
+      if (commitFlow === 'commit-pr' || commitFlow === 'commit-pr-target') {
+        const pushed = await window.api.git.pushCurrentBranch(worktreePath)
+        const baseBranch = commitFlow === 'commit-pr-target'
+          ? normalizeBranchName(selectedBaseBranch || defaultBaseBranch)
+          : undefined
+        if (commitFlow === 'commit-pr-target' && !baseBranch) {
+          throw new Error('Select a target branch for the PR')
+        }
+        const pr = await window.api.git.openOrCreatePr(worktreePath, baseBranch)
+        addToast({
+          id: crypto.randomUUID(),
+          message: pr.created
+            ? `Committed, pushed ${pushed.branch}, and created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
+            : `Committed, pushed ${pushed.branch}, and opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
+          type: 'info',
+        })
+        window.open(pr.url)
+        lastAutofilledCommitMsgRef.current = defaultCommitPrefix
+        setCommitMsg(defaultCommitPrefix)
+        return
+      }
+
       if (commitFlow === 'ship-main' || commitFlow === 'ship-main-close') {
         if (!project) {
           throw new Error('Project not found for this workspace')
@@ -262,11 +382,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
         return
       }
 
-      addToast({
-        id: crypto.randomUUID(),
-        message: 'Commit created',
-        type: 'info',
-      })
+      addToast({ id: crypto.randomUUID(), message: 'Commit created', type: 'info' })
       lastAutofilledCommitMsgRef.current = defaultCommitPrefix
       setCommitMsg(defaultCommitPrefix)
     })
@@ -279,6 +395,8 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     commitFlow,
     defaultCommitPrefix,
     project,
+    selectedBaseBranch,
+    defaultBaseBranch,
     deleteWorkspace,
     workspaceId,
     addToast,
@@ -319,8 +437,14 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     }
   }
 
-  const canCommit = !busy && !!commitMsg.trim() && (staged.length > 0 || unstaged.length > 0)
   const commitFlowOption = COMMIT_FLOW_OPTIONS.find((option) => option.id === commitFlow) ?? COMMIT_FLOW_OPTIONS[0]
+  const needsTargetBranch = commitFlow === 'commit-pr-target'
+  const canSelectTargetBranch = availableBaseBranches.length > 0
+  const canCommit =
+    !busy &&
+    !!commitMsg.trim() &&
+    (staged.length > 0 || unstaged.length > 0) &&
+    (!needsTargetBranch || !!selectedBaseBranch)
 
   return (
     <div className={styles.changedFilesList}>
@@ -377,6 +501,27 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
             </MenuPopover>
           </Menu>
         </div>
+        {needsTargetBranch && (
+          <div className={styles.flowDetailRow}>
+            <span className={styles.flowDetailLabel}>PR base</span>
+            <select
+              className={styles.flowSelect}
+              value={selectedBaseBranch}
+              onChange={(event) => setSelectedBaseBranch(normalizeBranchName(event.target.value))}
+              disabled={busy || !canSelectTargetBranch}
+            >
+              {canSelectTargetBranch ? (
+                availableBaseBranches.map((branch) => (
+                  <option key={branch} value={branch}>
+                    {branch}
+                  </option>
+                ))
+              ) : (
+                <option value="">No origin branches available</option>
+              )}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Staged section */}

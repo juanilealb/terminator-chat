@@ -698,6 +698,22 @@
   width: min(560px, calc(100vw - 40px));
 }
 
+.branchConflictSurface {
+  width: min(620px, calc(100vw - 40px));
+}
+
+.branchConflictContent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.branchConflictMeta {
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+}
+
 .createBranchContent {
   display: flex;
   flex-direction: column;

@@ -15,7 +15,11 @@ import {
   type AgentPermissionMode,
   type ChatMessage,
 } from '../../store/types'
-import { consumeQueuedPromptInserts } from '../../utils/template-routing'
+import {
+  consumeQueuedPromptInserts,
+  dispatchPromptInsertForThread,
+  queuePromptInsertForThread,
+} from '../../utils/template-routing'
 import type { ChatEventData, ChatThreadItemData } from '../../../shared/ipc-channels'
 import { mapChatEventToMessage } from './chat-event-mapper'
 import styles from './ChatPanel.module.css'
@@ -104,6 +108,153 @@ const PLAN_COMPLETION_QUESTION: ParsedInteractiveQuestion = {
 const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
 const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
+const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
+const INTERRUPT_THREAD_EVENT = 'chat:interrupt-thread'
+
+interface BranchExecutionLock {
+  key: string
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+  acquiredAt: number
+  heartbeatAt: number
+  expiresAt: number
+}
+
+interface BranchExecutionConflict {
+  key: string
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+  workspaceName?: string
+  threadTitle?: string
+}
+
+interface PendingSendPayload {
+  text: string
+  mode: SessionMode
+  images: AttachedImage[]
+}
+
+interface InterruptThreadEventDetail {
+  threadId: string
+  reason?: string
+}
+
+const branchExecutionLocksByKey = new Map<string, BranchExecutionLock>()
+
+function toBranchLockKey(projectId: string, branch: string): string {
+  return `${projectId}:${normalizeBranchName(branch).toLowerCase()}`
+}
+
+function pruneExpiredBranchLocks(now = Date.now()): void {
+  for (const [key, lock] of branchExecutionLocksByKey.entries()) {
+    if (lock.expiresAt <= now) {
+      branchExecutionLocksByKey.delete(key)
+    }
+  }
+}
+
+function acquireBranchExecutionLock(options: {
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+}): { acquired: true; key: string } | { acquired: false; conflict: BranchExecutionConflict } {
+  pruneExpiredBranchLocks()
+
+  const now = Date.now()
+  const normalizedBranch = normalizeBranchName(options.branch)
+  const key = toBranchLockKey(options.projectId, normalizedBranch)
+  const existing = branchExecutionLocksByKey.get(key)
+
+  if (existing && existing.threadId !== options.threadId) {
+    return {
+      acquired: false,
+      conflict: {
+        key,
+        projectId: existing.projectId,
+        branch: existing.branch,
+        workspaceId: existing.workspaceId,
+        threadId: existing.threadId,
+        status: existing.status,
+      },
+    }
+  }
+
+  const acquiredAt = existing?.acquiredAt ?? now
+  branchExecutionLocksByKey.set(key, {
+    key,
+    projectId: options.projectId,
+    branch: normalizedBranch,
+    workspaceId: options.workspaceId,
+    threadId: options.threadId,
+    status: options.status,
+    acquiredAt,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+
+  return { acquired: true, key }
+}
+
+function forceTakeBranchExecutionLock(options: {
+  projectId: string
+  branch: string
+  workspaceId: string
+  threadId: string
+  status: 'running' | 'waiting'
+}): string {
+  pruneExpiredBranchLocks()
+  const now = Date.now()
+  const normalizedBranch = normalizeBranchName(options.branch)
+  const key = toBranchLockKey(options.projectId, normalizedBranch)
+  branchExecutionLocksByKey.set(key, {
+    key,
+    projectId: options.projectId,
+    branch: normalizedBranch,
+    workspaceId: options.workspaceId,
+    threadId: options.threadId,
+    status: options.status,
+    acquiredAt: now,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+  return key
+}
+
+function touchBranchExecutionLock(key: string, threadId: string, status: 'running' | 'waiting'): void {
+  pruneExpiredBranchLocks()
+  const lock = branchExecutionLocksByKey.get(key)
+  if (!lock || lock.threadId !== threadId) return
+  const now = Date.now()
+  branchExecutionLocksByKey.set(key, {
+    ...lock,
+    status,
+    heartbeatAt: now,
+    expiresAt: now + BRANCH_EXECUTION_LOCK_TTL_MS,
+  })
+}
+
+function releaseBranchExecutionLock(key: string, threadId: string): void {
+  const lock = branchExecutionLocksByKey.get(key)
+  if (!lock || lock.threadId !== threadId) return
+  branchExecutionLocksByKey.delete(key)
+}
+
+function normalizeBranchSlug(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
 
 function normalizeBranchName(input: string): string {
   return input.trim().replace(/^origin\//, '').replace(/^refs\/heads\//, '')
@@ -1016,6 +1167,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [createBranchName, setCreateBranchName] = useState('')
   const [createBranchBase, setCreateBranchBase] = useState('main')
   const [creatingBranch, setCreatingBranch] = useState(false)
+  const [branchConflict, setBranchConflict] = useState<BranchExecutionConflict | null>(null)
+  const [pendingSendPayload, setPendingSendPayload] = useState<PendingSendPayload | null>(null)
+  const [resolvingBranchConflict, setResolvingBranchConflict] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -1028,6 +1182,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const eventTurnSequenceRef = useRef(0)
   const activeTurnHasItemsRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
+  const branchLockKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     const appendPrompt = (prompt: string) => {
@@ -1061,6 +1216,254 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     () => (workspace ? projects.find((project) => project.id === workspace.projectId) : undefined),
     [workspace, projects],
   )
+
+  const currentBranchLockKey = useMemo(() => {
+    if (!activeProject || !workspace?.branch) return null
+    return toBranchLockKey(activeProject.id, workspace.branch)
+  }, [activeProject, workspace?.branch])
+
+  const enrichBranchConflict = useCallback((conflict: BranchExecutionConflict): BranchExecutionConflict => {
+    const state = useAppStore.getState()
+    const workspaceName = state.workspaces.find((entry) => entry.id === conflict.workspaceId)?.name
+    const threadTitle = state.tabs.find(
+      (entry) => entry.type === 'chat' && entry.threadId === conflict.threadId,
+    )
+    return {
+      ...conflict,
+      workspaceName,
+      threadTitle: threadTitle?.type === 'chat' ? threadTitle.title : undefined,
+    }
+  }, [])
+
+  const findStatusConflictForCurrentBranch = useCallback((): BranchExecutionConflict | null => {
+    if (!activeProject || !workspace) return null
+    const normalizedBranch = normalizeBranchName(workspace.branch)
+    if (!normalizedBranch) return null
+
+    const state = useAppStore.getState()
+    for (const [candidateThreadId, candidate] of Object.entries(state._chatThreadStatusById)) {
+      if (candidateThreadId === threadId) continue
+      if (candidate.status !== 'running' && candidate.status !== 'waiting') continue
+
+      const candidateWorkspace = state.workspaces.find((entry) => entry.id === candidate.workspaceId)
+      if (!candidateWorkspace || candidateWorkspace.projectId !== activeProject.id) continue
+      if (normalizeBranchName(candidateWorkspace.branch) !== normalizedBranch) continue
+
+      return enrichBranchConflict({
+        key: toBranchLockKey(activeProject.id, normalizedBranch),
+        projectId: activeProject.id,
+        branch: normalizedBranch,
+        workspaceId: candidate.workspaceId,
+        threadId: candidateThreadId,
+        status: candidate.status,
+      })
+    }
+    return null
+  }, [activeProject, workspace, threadId, enrichBranchConflict])
+
+  const updateThreadStatusAndLock = useCallback((status: 'running' | 'waiting' | 'idle' | 'completed') => {
+    if (workspaceId) {
+      setChatThreadAgentStatus(workspaceId, threadId, status)
+    }
+
+    const key = branchLockKeyRef.current
+    if (!key) return
+
+    if (status === 'running' || status === 'waiting') {
+      touchBranchExecutionLock(key, threadId, status)
+    } else {
+      releaseBranchExecutionLock(key, threadId)
+      branchLockKeyRef.current = null
+    }
+  }, [workspaceId, threadId, setChatThreadAgentStatus])
+
+  const releaseOwnedBranchLock = useCallback(() => {
+    const key = branchLockKeyRef.current
+    if (!key) return
+    releaseBranchExecutionLock(key, threadId)
+    branchLockKeyRef.current = null
+  }, [threadId])
+
+  const resolveBranchWorkspace = useCallback(async (
+    targetBranch: string,
+    options: {
+      createNewBranch: boolean
+      baseBranch?: string
+      errorFallbackMessage: string
+    },
+  ) => {
+    if (!activeProject) return null
+
+    const normalizedTargetBranch = normalizeBranchName(targetBranch)
+    if (!normalizedTargetBranch) return null
+
+    let targetWorkspace = workspaces.find(
+      (entry) =>
+        entry.projectId === activeProject.id &&
+        normalizeBranchName(entry.branch) === normalizedTargetBranch,
+    )
+    if (targetWorkspace) return targetWorkspace
+
+    const workspaceName = uniqueWorkspaceName(
+      toWorkspaceNameFromBranch(normalizedTargetBranch),
+      activeProject.id,
+      workspaces,
+    )
+
+    try {
+      const worktreePath = await window.api.git.createWorktree(
+        activeProject.repoPath,
+        workspaceName,
+        normalizedTargetBranch,
+        options.createNewBranch,
+        options.createNewBranch
+          ? normalizeBranchName(options.baseBranch ?? workspace?.branch ?? '') || 'main'
+          : undefined,
+      )
+
+      targetWorkspace = {
+        id: crypto.randomUUID(),
+        name: workspaceName,
+        type: DEFAULT_WORKSPACE_TYPE,
+        branch: normalizedTargetBranch,
+        worktreePath,
+        projectId: activeProject.id,
+        agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+        memory: '',
+      }
+      addWorkspace(targetWorkspace)
+      return targetWorkspace
+    } catch (err) {
+      const message = formatUserError(err, options.errorFallbackMessage)
+
+      if (message === 'BRANCH_CHECKED_OUT') {
+        try {
+          const listed = await window.api.git.listWorktrees(activeProject.repoPath)
+          const matchingWorktree = listed.find(
+            (entry) =>
+              normalizeBranchName(entry.branch) === normalizedTargetBranch &&
+              entry.path,
+          )
+
+          if (matchingWorktree) {
+            const existingByPath = workspaces.find(
+              (entry) =>
+                entry.projectId === activeProject.id &&
+                entry.worktreePath.toLowerCase() === matchingWorktree.path.toLowerCase(),
+            )
+
+            if (existingByPath) {
+              if (normalizeBranchName(existingByPath.branch) !== normalizedTargetBranch) {
+                updateWorkspaceBranch(existingByPath.id, normalizedTargetBranch)
+              }
+              return existingByPath
+            }
+
+            targetWorkspace = {
+              id: crypto.randomUUID(),
+              name: workspaceName,
+              type: DEFAULT_WORKSPACE_TYPE,
+              branch: normalizedTargetBranch,
+              worktreePath: matchingWorktree.path,
+              projectId: activeProject.id,
+              agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
+              memory: '',
+            }
+            addWorkspace(targetWorkspace)
+            return targetWorkspace
+          }
+        } catch {
+          // Keep default error path when worktree recovery fails.
+        }
+      }
+
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+      return null
+    }
+  }, [
+    activeProject,
+    workspace?.branch,
+    workspaces,
+    addWorkspace,
+    addToast,
+    updateWorkspaceBranch,
+  ])
+
+  const activateWorkspaceChat = useCallback(async (targetWorkspaceId: string) => {
+    setActiveWorkspace(targetWorkspaceId)
+    if (activeProject) {
+      const targetWorkspace = useAppStore.getState().workspaces.find((entry) => entry.id === targetWorkspaceId)
+      if (targetWorkspace) {
+        setLastSelectedBranch(activeProject.id, normalizeBranchName(targetWorkspace.branch))
+      }
+    }
+
+    const latestBeforeCreate = useAppStore.getState()
+    const hasChat = latestBeforeCreate.tabs.some(
+      (entry) => entry.workspaceId === targetWorkspaceId && entry.type === 'chat',
+    )
+    if (!hasChat) {
+      await createChatForActiveWorkspace()
+    }
+
+    const latest = useAppStore.getState()
+    const chatTabs = latest.tabs.filter(
+      (entry) => entry.workspaceId === targetWorkspaceId && entry.type === 'chat',
+    )
+    const activeChat = chatTabs.find((entry) => entry.id === latest.activeTabId)
+    const targetChat = activeChat ?? chatTabs[0]
+    if (targetChat?.type === 'chat') {
+      latest.setActiveTab(targetChat.id)
+      return targetChat
+    }
+    return null
+  }, [activeProject, setActiveWorkspace, setLastSelectedBranch, createChatForActiveWorkspace])
+
+  const suggestIsolatedBranchName = useCallback(async () => {
+    if (!activeProject || !workspace) return null
+    const baseBranch = normalizeBranchName(workspace.branch) || 'main'
+    const baseSlug = normalizeBranchSlug(baseBranch.split('/').pop() ?? baseBranch) || 'work'
+    const prefix = `thread/${baseSlug}-${threadId.slice(0, 6).toLowerCase()}`
+
+    const existingBranches = new Set<string>()
+    for (const entry of workspaces) {
+      if (entry.projectId === activeProject.id) {
+        existingBranches.add(normalizeBranchName(entry.branch))
+      }
+    }
+
+    try {
+      const gitBranches = await window.api.git.getBranches(activeProject.repoPath)
+      for (const branch of gitBranches) {
+        existingBranches.add(normalizeBranchName(branch))
+      }
+    } catch {
+      // keep workspace-only fallback
+    }
+
+    if (!existingBranches.has(prefix)) return prefix
+    for (let index = 2; index < 500; index += 1) {
+      const candidate = `${prefix}-${index}`
+      if (!existingBranches.has(candidate)) return candidate
+    }
+    return `${prefix}-${Date.now().toString(36)}`
+  }, [activeProject, workspace, threadId, workspaces])
+
+  const routePendingPromptToThread = useCallback((targetThreadId: string, payload: PendingSendPayload | null) => {
+    if (!payload) return
+    const trimmed = payload.text.trim()
+    if (trimmed) {
+      queuePromptInsertForThread(targetThreadId, trimmed)
+      dispatchPromptInsertForThread(targetThreadId, trimmed)
+    }
+    if (payload.images.length > 0) {
+      addToast({
+        id: crypto.randomUUID(),
+        type: 'info',
+        message: 'Image attachments were kept in the original thread. Re-attach them in the new branch thread.',
+      })
+    }
+  }, [addToast])
 
   const branchContexts = useMemo(() => {
     if (!activeProject) return []
@@ -1138,6 +1541,32 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [workspace?.branch])
 
   useEffect(() => {
+    const expectedKey = currentBranchLockKey
+    const currentKey = branchLockKeyRef.current
+    if (!currentKey) return
+    if (expectedKey && currentKey === expectedKey) return
+    releaseOwnedBranchLock()
+  }, [currentBranchLockKey, releaseOwnedBranchLock])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<InterruptThreadEventDetail>).detail
+      if (!detail || detail.threadId !== threadId) return
+      const realThreadId = realThreadIdRef.current
+      if (realThreadId) {
+        window.api.chat.cancel(realThreadId)
+      }
+      setLoading(false)
+      updateThreadStatusAndLock('idle')
+    }
+
+    window.addEventListener(INTERRUPT_THREAD_EVENT, handler)
+    return () => {
+      window.removeEventListener(INTERRUPT_THREAD_EVENT, handler)
+    }
+  }, [threadId, updateThreadStatusAndLock])
+
+  useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
@@ -1192,7 +1621,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     realThreadIdRef.current = null
     eventTurnSequenceRef.current = 0
     activeTurnHasItemsRef.current = false
-  }, [])
+    updateThreadStatusAndLock('idle')
+  }, [updateThreadStatusAndLock])
 
   useEffect(() => {
     return () => {
@@ -1200,11 +1630,10 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       if (previousThreadId) {
         void window.api.chat.destroyThread(previousThreadId).catch(() => {})
       }
-      if (workspaceId) {
-        setChatThreadAgentStatus(workspaceId, threadId, 'idle')
-      }
+      updateThreadStatusAndLock('idle')
+      releaseOwnedBranchLock()
     }
-  }, [workspaceId, threadId, setChatThreadAgentStatus])
+  }, [updateThreadStatusAndLock, releaseOwnedBranchLock])
 
   const toScopedItemId = useCallback((rawId: unknown) => {
     const normalizedRawId = typeof rawId === 'string' && rawId.trim().length > 0
@@ -1318,13 +1747,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'running')
+        updateThreadStatusAndLock('running')
         return
       }
 
       if (phase === 'turn.waiting_input') {
         setLoading(false)
-        if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+        updateThreadStatusAndLock('waiting')
         const waitingMessage = mapChatEventToMessage({
           data: typedData,
           eventType: type,
@@ -1353,7 +1782,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
           if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
             setLoading(false)
-            if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+            updateThreadStatusAndLock('waiting')
             notifyInactiveChatTab('waiting_input')
           }
           if (msg && parsedTextQuestion) {
@@ -1368,7 +1797,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             const interactiveQuestion = parseInteractiveQuestionPayload(raw)
             if (interactiveQuestion) {
               setLoading(false)
-              if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+              updateThreadStatusAndLock('waiting')
               notifyInactiveChatTab('waiting_input')
               msg = {
                 id: scopedId,
@@ -1388,7 +1817,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else if (phase === 'turn.completed') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'completed')
+        updateThreadStatusAndLock('completed')
         const completionMessage = mapChatEventToMessage({
           data: typedData,
           eventType: type,
@@ -1405,7 +1834,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else if (phase === 'turn.cancelled') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
+        updateThreadStatusAndLock('idle')
         const cancelledMessage = mapChatEventToMessage({
           data: typedData,
           eventType: type,
@@ -1418,7 +1847,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
-        if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
+        updateThreadStatusAndLock('idle')
         const failureMessage = mapChatEventToMessage({
           data: typedData,
           eventType: type,
@@ -1440,7 +1869,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           : null
         if (interactiveQuestion) {
           setLoading(false)
-          if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+          updateThreadStatusAndLock('waiting')
           notifyInactiveChatTab('waiting_input')
           appendChatMessage({
             id: crypto.randomUUID(),
@@ -1472,7 +1901,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     workspaceId,
     toScopedItemId,
     toLifecycleMessageId,
-    setChatThreadAgentStatus,
+    updateThreadStatusAndLock,
     notifyInactiveChatTab,
     appendChatMessage,
     appendPlanCompletionCard,
@@ -1498,6 +1927,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     text?: string
     mode?: SessionMode
     images?: AttachedImage[]
+    forceTakeover?: boolean
   }) => {
     const text = overrides?.text ?? input
     const images = overrides?.images ?? attachedImages
@@ -1505,6 +1935,51 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     if ((!trimmed && images.length === 0) || !worktreePath) return
 
     const effectiveMode = overrides?.mode ?? sessionMode
+
+    if (activeProject && workspace) {
+      const normalizedBranch = normalizeBranchName(workspace.branch)
+      if (normalizedBranch) {
+        const pendingPayload: PendingSendPayload = {
+          text,
+          mode: effectiveMode,
+          images,
+        }
+
+        const statusConflict = findStatusConflictForCurrentBranch()
+        if (statusConflict && !overrides?.forceTakeover) {
+          setPendingSendPayload(pendingPayload)
+          setBranchConflict(statusConflict)
+          return
+        }
+
+        if (overrides?.forceTakeover) {
+          branchLockKeyRef.current = forceTakeBranchExecutionLock({
+            projectId: activeProject.id,
+            branch: normalizedBranch,
+            workspaceId,
+            threadId,
+            status: 'running',
+          })
+        } else {
+          const lockResult = acquireBranchExecutionLock({
+            projectId: activeProject.id,
+            branch: normalizedBranch,
+            workspaceId,
+            threadId,
+            status: 'running',
+          })
+
+          if (!lockResult.acquired) {
+            setPendingSendPayload(pendingPayload)
+            setBranchConflict(enrichBranchConflict(lockResult.conflict))
+            return
+          }
+
+          branchLockKeyRef.current = lockResult.key
+        }
+      }
+    }
+
     const isPlanMode = effectiveMode === 'plan'
     const planPrompt = trimmed
       ? `${PLAN_MODE_PREFIX}\n\nUser request:\n${trimmed}`
@@ -1539,6 +2014,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         eventTurnSequenceRef.current = 0
         activeTurnHasItemsRef.current = false
       } catch (err) {
+        releaseOwnedBranchLock()
         useAppStore.setState((s) => ({
           chatMessages: {
             ...s.chatMessages,
@@ -1574,7 +2050,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     setInput('')
     setAttachedImages([])
     setLoading(true)
-    if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'running')
+    updateThreadStatusAndLock('running')
 
     // Auto-resize textarea
     if (textareaRef.current) {
@@ -1601,7 +2077,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       await window.api.chat.send(realThreadIdRef.current!, sendInput)
     } catch (err) {
       setLoading(false)
-      if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
+      updateThreadStatusAndLock('idle')
       useAppStore.setState((s) => ({
         chatMessages: {
           ...s.chatMessages,
@@ -1626,8 +2102,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     effort,
     attachedImages,
     sessionMode,
+    activeProject,
+    workspace,
     agentPermissionMode,
-    setChatThreadAgentStatus,
+    findStatusConflictForCurrentBranch,
+    enrichBranchConflict,
+    releaseOwnedBranchLock,
+    updateThreadStatusAndLock,
   ])
 
   const handleQuestionOptionSelect = useCallback((answer: string, optionId: string) => {
@@ -1669,8 +2150,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       window.api.chat.cancel(realThreadIdRef.current)
     }
     setLoading(false)
-    if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
-  }, [workspaceId, threadId, setChatThreadAgentStatus])
+    updateThreadStatusAndLock('idle')
+  }, [updateThreadStatusAndLock])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Tab' && e.shiftKey) {
@@ -1755,114 +2236,24 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [])
 
   const handleSwitchBranchContext = useCallback(async (targetBranch: string) => {
-    if (!activeProject || !workspace) return
+    if (!workspace) return
     const normalizedTargetBranch = normalizeBranchName(targetBranch)
     if (normalizedTargetBranch === normalizeBranchName(workspace.branch)) return
 
-    let targetWorkspace = workspaces.find(
-      (entry) =>
-        entry.projectId === activeProject.id &&
-        normalizeBranchName(entry.branch) === normalizedTargetBranch,
-    )
-
-    if (!targetWorkspace) {
-      const workspaceName = uniqueWorkspaceName(
-        toWorkspaceNameFromBranch(normalizedTargetBranch),
-        activeProject.id,
-        workspaces,
-      )
-
-      try {
-        const worktreePath = await window.api.git.createWorktree(
-          activeProject.repoPath,
-          workspaceName,
-          normalizedTargetBranch,
-          false,
-        )
-
-        targetWorkspace = {
-          id: crypto.randomUUID(),
-          name: workspaceName,
-          type: DEFAULT_WORKSPACE_TYPE,
-          branch: normalizedTargetBranch,
-          worktreePath,
-          projectId: activeProject.id,
-          agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-          memory: '',
-        }
-        addWorkspace(targetWorkspace)
-      } catch (err) {
-        const msg = formatUserError(err, 'Failed to switch branch context')
-
-        if (msg === 'BRANCH_CHECKED_OUT') {
-          try {
-            const listed = await window.api.git.listWorktrees(activeProject.repoPath)
-            const matchingWorktree = listed.find(
-              (entry) =>
-                normalizeBranchName(entry.branch) === normalizedTargetBranch &&
-                entry.path,
-            )
-
-            if (matchingWorktree) {
-              const existingByPath = workspaces.find(
-                (entry) =>
-                  entry.projectId === activeProject.id &&
-                  entry.worktreePath.toLowerCase() === matchingWorktree.path.toLowerCase(),
-              )
-
-              if (existingByPath) {
-                if (normalizeBranchName(existingByPath.branch) !== normalizedTargetBranch) {
-                  updateWorkspaceBranch(existingByPath.id, normalizedTargetBranch)
-                }
-                targetWorkspace = existingByPath
-              } else {
-                targetWorkspace = {
-                  id: crypto.randomUUID(),
-                  name: workspaceName,
-                  type: DEFAULT_WORKSPACE_TYPE,
-                  branch: normalizedTargetBranch,
-                  worktreePath: matchingWorktree.path,
-                  projectId: activeProject.id,
-                  agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-                  memory: '',
-                }
-                addWorkspace(targetWorkspace)
-              }
-            }
-          } catch {
-            // Keep default error path below when recovery fails.
-          }
-        }
-
-        if (!targetWorkspace) {
-          addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
-          return
-        }
-      }
-    }
-
-    setActiveWorkspace(targetWorkspace.id)
-    setLastSelectedBranch(activeProject.id, normalizedTargetBranch)
-
-    const latest = useAppStore.getState()
-    const hasTabs = latest.tabs.some((tab) => tab.workspaceId === targetWorkspace.id)
-    if (!hasTabs) {
-      await createChatForActiveWorkspace()
-    }
+    const targetWorkspace = await resolveBranchWorkspace(normalizedTargetBranch, {
+      createNewBranch: false,
+      errorFallbackMessage: 'Failed to switch branch context',
+    })
+    if (!targetWorkspace) return
+    await activateWorkspaceChat(targetWorkspace.id)
   }, [
-    activeProject,
     workspace,
-    workspaces,
-    addWorkspace,
-    addToast,
-    updateWorkspaceBranch,
-    setActiveWorkspace,
-    setLastSelectedBranch,
-    createChatForActiveWorkspace,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
   ])
 
   const handleCreateBranchContext = useCallback(async () => {
-    if (!activeProject || !workspace) return
+    if (!workspace) return
 
     const branch = normalizeBranchName(createBranchName)
     const baseBranch = normalizeBranchName(createBranchBase) || normalizeBranchName(workspace.branch) || 'main'
@@ -1878,68 +2269,111 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     setCreatingBranch(true)
     try {
-      let targetWorkspace = workspaces.find(
-        (entry) =>
-          entry.projectId === activeProject.id &&
-          normalizeBranchName(entry.branch) === branch,
-      )
+      const targetWorkspace = await resolveBranchWorkspace(branch, {
+        createNewBranch: true,
+        baseBranch,
+        errorFallbackMessage: 'Failed to create branch context',
+      })
+      if (!targetWorkspace) return
 
-      if (!targetWorkspace) {
-        const workspaceName = uniqueWorkspaceName(
-          toWorkspaceNameFromBranch(branch),
-          activeProject.id,
-          workspaces,
-        )
-
-        const worktreePath = await window.api.git.createWorktree(
-          activeProject.repoPath,
-          workspaceName,
-          branch,
-          true,
-          baseBranch,
-        )
-
-        targetWorkspace = {
-          id: crypto.randomUUID(),
-          name: workspaceName,
-          type: DEFAULT_WORKSPACE_TYPE,
-          branch,
-          worktreePath,
-          projectId: activeProject.id,
-          agentPermissionMode: DEFAULT_AGENT_PERMISSION_MODE,
-          memory: '',
-        }
-        addWorkspace(targetWorkspace)
-      }
-
-      setActiveWorkspace(targetWorkspace.id)
-      setLastSelectedBranch(activeProject.id, branch)
-
-      const latest = useAppStore.getState()
-      const hasTabs = latest.tabs.some((tab) => tab.workspaceId === targetWorkspace.id)
-      if (!hasTabs) {
-        await createChatForActiveWorkspace()
-      }
+      await activateWorkspaceChat(targetWorkspace.id)
 
       setCreateBranchOpen(false)
       setCreateBranchName('')
-    } catch (err) {
-      const msg = formatUserError(err, 'Failed to create branch context')
-      addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
     } finally {
       setCreatingBranch(false)
     }
   }, [
-    activeProject,
     workspace,
     createBranchName,
     createBranchBase,
-    workspaces,
-    addWorkspace,
     addToast,
-    setActiveWorkspace,
-    setLastSelectedBranch,
-    createChatForActiveWorkspace,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
+  ])
+
+  const handleBranchConflictDismiss = useCallback(() => {
+    setBranchConflict(null)
+    setPendingSendPayload(null)
+  }, [])
+
+  const handleBranchConflictTakeover = useCallback(() => {
+    if (!branchConflict || !workspace || !activeProject) return
+
+    setResolvingBranchConflict(true)
+    window.dispatchEvent(new CustomEvent<InterruptThreadEventDetail>(INTERRUPT_THREAD_EVENT, {
+      detail: {
+        threadId: branchConflict.threadId,
+        reason: 'branch-takeover',
+      },
+    }))
+    updateThreadStatusAndLock('idle')
+    setChatThreadAgentStatus(branchConflict.workspaceId, branchConflict.threadId, 'idle')
+    branchLockKeyRef.current = forceTakeBranchExecutionLock({
+      projectId: activeProject.id,
+      branch: workspace.branch,
+      workspaceId,
+      threadId,
+      status: 'running',
+    })
+
+    const pending = pendingSendPayload
+    setBranchConflict(null)
+    setPendingSendPayload(null)
+    setResolvingBranchConflict(false)
+
+    if (pending) {
+      void handleSend({
+        text: pending.text,
+        mode: pending.mode,
+        images: pending.images,
+        forceTakeover: true,
+      })
+    }
+  }, [
+    branchConflict,
+    workspace,
+    activeProject,
+    workspaceId,
+    threadId,
+    pendingSendPayload,
+    setChatThreadAgentStatus,
+    updateThreadStatusAndLock,
+    handleSend,
+  ])
+
+  const handleBranchConflictCreateIsolated = useCallback(async () => {
+    if (!workspace || !activeProject) return
+    setResolvingBranchConflict(true)
+    try {
+      const isolatedBranch = await suggestIsolatedBranchName()
+      if (!isolatedBranch) return
+
+      const targetWorkspace = await resolveBranchWorkspace(isolatedBranch, {
+        createNewBranch: true,
+        baseBranch: workspace.branch,
+        errorFallbackMessage: 'Failed to create isolated branch context',
+      })
+      if (!targetWorkspace) return
+
+      const targetChat = await activateWorkspaceChat(targetWorkspace.id)
+      if (targetChat?.type === 'chat') {
+        routePendingPromptToThread(targetChat.threadId, pendingSendPayload)
+      }
+
+      setBranchConflict(null)
+      setPendingSendPayload(null)
+    } finally {
+      setResolvingBranchConflict(false)
+    }
+  }, [
+    workspace,
+    activeProject,
+    suggestIsolatedBranchName,
+    resolveBranchWorkspace,
+    activateWorkspaceChat,
+    routePendingPromptToThread,
+    pendingSendPayload,
   ])
 
   // File picker
@@ -2176,6 +2610,57 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           </div>
         )}
       </div>
+
+      <Dialog
+        open={!!branchConflict}
+        onOpenChange={(_, data) => {
+          if (!data.open && !resolvingBranchConflict) {
+            handleBranchConflictDismiss()
+          }
+        }}
+      >
+        <DialogSurface className={styles.branchConflictSurface}>
+          <DialogBody>
+            <DialogTitle>Branch is busy</DialogTitle>
+            <DialogContent className={styles.branchConflictContent}>
+              {branchConflict && (
+                <>
+                  <div>
+                    {branchConflict.threadTitle ?? 'Another thread'} is currently {branchConflict.status} on branch{' '}
+                    <code>{branchConflict.branch}</code>.
+                  </div>
+                  <div className={styles.branchConflictMeta}>
+                    Workspace: {branchConflict.workspaceName ?? branchConflict.workspaceId}
+                  </div>
+                </>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                onClick={handleBranchConflictDismiss}
+                disabled={resolvingBranchConflict}
+              >
+                Keep read-only
+              </Button>
+              <Button
+                appearance="secondary"
+                onClick={() => { void handleBranchConflictCreateIsolated() }}
+                disabled={resolvingBranchConflict}
+              >
+                {resolvingBranchConflict ? 'Switching...' : 'Create isolated branch'}
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={handleBranchConflictTakeover}
+                disabled={resolvingBranchConflict}
+              >
+                Take control
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
 
       <Dialog
         open={createBranchOpen}

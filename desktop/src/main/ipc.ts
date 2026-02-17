@@ -22,6 +22,13 @@ const codexService = new CodexService()
 
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
+const EDITOR_LAUNCH_GRACE_MS = (() => {
+  const raw = Number.parseInt(process.env.TERMINATOR_EDITOR_LAUNCH_GRACE_MS ?? '', 10)
+  if (Number.isFinite(raw)) {
+    return Math.min(10000, Math.max(400, raw))
+  }
+  return 2500
+})()
 
 function serializeError(error: unknown): unknown {
   if (error instanceof Error) {
@@ -284,9 +291,9 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     )
   })
 
-  ipcMain.handle(IPC.GIT_OPEN_OR_CREATE_PR, async (_e, worktreePath: string) => {
-    return runGitOperation('open-or-create-pr', { worktreePath }, () =>
-      GitService.openOrCreatePullRequest(worktreePath),
+  ipcMain.handle(IPC.GIT_OPEN_OR_CREATE_PR, async (_e, worktreePath: string, baseBranch?: string) => {
+    return runGitOperation('open-or-create-pr', { worktreePath, baseBranch }, () =>
+      GitService.openOrCreatePullRequest(worktreePath, baseBranch),
     )
   })
 
@@ -698,7 +705,7 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
         child.unref()
         // Some launchers fail immediately after spawn (bad args/path/permissions).
         // Wait a short grace period so we can catch a fast non-zero exit.
-        closeTimer = setTimeout(() => finish({ ok: true }), 1200)
+        closeTimer = setTimeout(() => finish({ ok: true }), EDITOR_LAUNCH_GRACE_MS)
       })
       child.once('close', (code) => {
         if (code === 0) finish({ ok: true })

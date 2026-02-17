@@ -66,8 +66,8 @@ const api = {
       ipcRenderer.invoke(IPC.GIT_COMMIT, worktreePath, message),
     pushCurrentBranch: (worktreePath: string) =>
       ipcRenderer.invoke(IPC.GIT_PUSH_CURRENT_BRANCH, worktreePath) as Promise<{ branch: string }>,
-    openOrCreatePr: (worktreePath: string) =>
-      ipcRenderer.invoke(IPC.GIT_OPEN_OR_CREATE_PR, worktreePath) as Promise<{
+    openOrCreatePr: (worktreePath: string, baseBranch?: string) =>
+      ipcRenderer.invoke(IPC.GIT_OPEN_OR_CREATE_PR, worktreePath, baseBranch) as Promise<{
         url: string
         created: boolean
         branch: string

@@ -22,6 +22,10 @@ function queuePromptInsert(detail: ChatInsertEventDetail): void {
   pendingPromptInsertsByThread.set(detail.threadId, queue)
 }
 
+export function queuePromptInsertForThread(threadId: string, prompt: string): void {
+  queuePromptInsert({ threadId, prompt })
+}
+
 export function consumeQueuedPromptInserts(threadId: string): string[] {
   const queue = pendingPromptInsertsByThread.get(threadId) ?? []
   pendingPromptInsertsByThread.delete(threadId)
@@ -30,6 +34,10 @@ export function consumeQueuedPromptInserts(threadId: string): string[] {
 
 function dispatchInsertPrompt(detail: ChatInsertEventDetail): void {
   window.dispatchEvent(new CustomEvent<ChatInsertEventDetail>('chat:insertPrompt', { detail }))
+}
+
+export function dispatchPromptInsertForThread(threadId: string, prompt: string): void {
+  dispatchInsertPrompt({ threadId, prompt })
 }
 
 export async function routeExpandedTemplateToChat(options: RouteTemplateToChatOptions): Promise<void> {
