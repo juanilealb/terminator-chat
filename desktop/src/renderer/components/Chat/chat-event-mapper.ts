@@ -11,11 +11,15 @@ interface MapChatEventToMessageInput {
 type ItemStatus = 'in_progress' | 'completed' | 'failed'
 
 function normalizeItemStatus(eventType: string, fallback: unknown): ItemStatus {
-  if (fallback === 'completed' || fallback === 'failed' || fallback === 'in_progress') {
-    return fallback
-  }
+  if (fallback === 'failed') return 'failed'
   if (eventType === 'item.completed') return 'completed'
+  if (fallback === 'completed') return 'completed'
+  if (fallback === 'in_progress') return 'in_progress'
   return 'in_progress'
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled chat event data variant: ${JSON.stringify(value)}`)
 }
 
 export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMessage | null {
@@ -193,7 +197,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
           raw: data.raw,
         },
       }
-    default:
-      return null
   }
+
+  return assertNever(data)
 }
