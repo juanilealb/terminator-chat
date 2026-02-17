@@ -1,5 +1,12 @@
 import { type BrowserWindow } from 'electron'
-import { IPC, type ChatEventPayload, type ChatLifecyclePhase } from '../shared/ipc-channels'
+import {
+  IPC,
+  type ChatEventData,
+  type ChatEventPayload,
+  type ChatLifecyclePhase,
+  type ChatThreadItemData,
+  type ChatUsage,
+} from '../shared/ipc-channels'
 import { notifyWorkspace } from './agent-notifier'
 
 // Lazy-import the SDK so that if it fails to load (e.g. on Windows where the
@@ -121,7 +128,7 @@ export class CodexService {
     const waitingNotified = { value: false }
     let emittedTerminalPhase = false
 
-    const emitTerminalPhase = (type: 'turn.completed' | 'turn.failed' | 'turn.cancelled', data: Record<string, unknown>) => {
+    const emitTerminalPhase = (type: 'turn.completed' | 'turn.failed' | 'turn.cancelled', data: ChatEventData) => {
       if (emittedTerminalPhase) return
       emittedTerminalPhase = true
       this.emitEvent(win, {
@@ -220,7 +227,7 @@ export class CodexService {
       threadId: string
       type: string
       phase: ChatLifecyclePhase
-      data: Record<string, unknown>
+      data: ChatEventData
       workspaceId?: string
       turnId?: string
     },
@@ -228,6 +235,7 @@ export class CodexService {
     if (win.isDestroyed()) return
     const event: ChatEventPayload = {
       eventId: crypto.randomUUID(),
+      eventVersion: 'sdk-0.101.0',
       ts: Date.now(),
       threadId: payload.threadId,
       workspaceId: payload.workspaceId,
@@ -275,88 +283,105 @@ function mapPhase(type: string): ChatLifecyclePhase {
   return 'unknown'
 }
 
-function serializeEvent(event: any): Record<string, unknown> {
+function serializeEvent(event: any): ChatEventData {
   switch (event.type) {
     case 'item.started':
     case 'item.updated':
     case 'item.completed':
       return serializeItem(event.item)
     case 'turn.completed':
-      return { type: 'turn.completed', usage: event.usage }
+      return { type: 'turn.completed', usage: toChatUsage(event.usage) }
     case 'turn.failed':
-      return { type: 'turn.failed', message: event.error.message }
+      return { type: 'turn.failed', message: toStringOrFallback(event?.error?.message, 'Turn failed') }
     case 'thread.started':
-      return { type: 'thread.started', thread_id: event.thread_id }
+      return { type: 'thread.started', thread_id: toStringOrFallback(event.thread_id, '') }
     case 'turn.started':
       return { type: 'turn.started' }
     case 'error':
-      return { type: 'error', message: event.message }
+      return { type: 'error', message: toStringOrFallback(event.message, 'Unknown error') }
     default:
-      return ensureRecord(event, { type: 'unknown' })
+      return {
+        type: 'unknown_event',
+        raw: ensureRecord(event, { type: 'unknown_event' }),
+      }
   }
 }
 
-function looksLikeWaitingInput(data: Record<string, unknown>): boolean {
+function looksLikeWaitingInput(data: ChatEventData): boolean {
   if (data.type !== 'agent_message') return false
-  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  const text = data.text.trim()
   if (!text) return false
   if (/^question\s+\d+\/\d+/i.test(text)) return true
   if (/tab to add notes|enter to submit answer|esc to interrupt/i.test(text)) return true
   return false
 }
 
-function serializeItem(item: any): Record<string, unknown> {
+function serializeItem(item: any): ChatThreadItemData {
   switch (item.type) {
     case 'agent_message':
-      return { type: 'agent_message', id: item.id, text: item.text }
+      return {
+        type: 'agent_message',
+        id: toStringOrFallback(item.id, ''),
+        text: toStringOrFallback(item.text, ''),
+      }
     case 'reasoning':
-      return { type: 'reasoning', id: item.id, text: item.text }
+      return {
+        type: 'reasoning',
+        id: toStringOrFallback(item.id, ''),
+        text: toStringOrFallback(item.text, ''),
+      }
     case 'command_execution':
       return {
         type: 'command_execution',
-        id: item.id,
-        command: item.command,
-        aggregated_output: item.aggregated_output,
-        exit_code: item.exit_code,
-        status: item.status,
+        id: toStringOrFallback(item.id, ''),
+        command: toStringOrFallback(item.command, ''),
+        aggregated_output: toStringOrFallback(item.aggregated_output, ''),
+        exit_code: typeof item.exit_code === 'number' ? item.exit_code : undefined,
+        status: item.status === 'completed' || item.status === 'failed' ? item.status : 'in_progress',
       }
     case 'file_change':
       return {
         type: 'file_change',
-        id: item.id,
-        changes: item.changes,
-        status: item.status,
+        id: toStringOrFallback(item.id, ''),
+        changes: normalizeFileChanges(item.changes),
+        status: item.status === 'failed' ? 'failed' : 'completed',
       }
     case 'mcp_tool_call':
       return {
         type: 'mcp_tool_call',
-        id: item.id,
-        server: item.server,
-        tool: item.tool,
+        id: toStringOrFallback(item.id, ''),
+        server: toStringOrFallback(item.server, ''),
+        tool: toStringOrFallback(item.tool, ''),
         arguments: item.arguments,
-        result: item.result,
-        error: item.error,
-        status: item.status,
+        result: normalizeMcpResult(item.result),
+        error: normalizeMcpError(item.error),
+        status: item.status === 'completed' || item.status === 'failed' ? item.status : 'in_progress',
       }
     case 'web_search':
       return {
         type: 'web_search',
-        id: item.id,
-        query: item.query,
+        id: toStringOrFallback(item.id, ''),
+        query: toStringOrFallback(item.query, ''),
       }
     case 'todo_list':
       return {
         type: 'todo_list',
-        id: item.id,
-        items: item.items,
+        id: toStringOrFallback(item.id, ''),
+        items: normalizeTodoItems(item.items),
       }
     case 'error':
-      return { type: 'error', id: item.id, message: item.message }
+      return {
+        type: 'error',
+        id: toStringOrFallback(item.id, ''),
+        message: toStringOrFallback(item.message, 'Unknown item error'),
+      }
     default:
-      return ensureRecord(item, {
-        type: typeof item?.type === 'string' ? item.type : 'unknown',
-        id: typeof item?.id === 'string' ? item.id : '',
-      })
+      return {
+        type: 'unknown_item',
+        id: toStringOrFallback(item?.id, ''),
+        item_type: toStringOrFallback(item?.type, 'unknown'),
+        raw: ensureRecord(item, { type: 'unknown_item' }),
+      }
   }
 }
 
@@ -372,4 +397,59 @@ function ensureRecord(value: unknown, fallback: Record<string, unknown>): Record
     }
   }
   return fallback
+}
+
+function toStringOrFallback(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function toChatUsage(value: unknown): ChatUsage {
+  const raw = ensureRecord(value, {})
+  return {
+    input_tokens: typeof raw.input_tokens === 'number' ? raw.input_tokens : 0,
+    cached_input_tokens: typeof raw.cached_input_tokens === 'number' ? raw.cached_input_tokens : 0,
+    output_tokens: typeof raw.output_tokens === 'number' ? raw.output_tokens : 0,
+  }
+}
+
+function normalizeFileChanges(value: unknown): Array<{ path: string; kind: 'add' | 'delete' | 'update' }> {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const record = ensureRecord(entry, {})
+      const path = toStringOrFallback(record.path, '')
+      const kind = record.kind === 'add' || record.kind === 'delete' ? record.kind : 'update'
+      if (!path) return null
+      return { path, kind }
+    })
+    .filter((entry): entry is { path: string; kind: 'add' | 'delete' | 'update' } => entry !== null)
+}
+
+function normalizeTodoItems(value: unknown): Array<{ text: string; completed: boolean }> {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry) => {
+      const record = ensureRecord(entry, {})
+      const text = toStringOrFallback(record.text, '').trim()
+      if (!text) return null
+      return { text, completed: record.completed === true }
+    })
+    .filter((entry): entry is { text: string; completed: boolean } => entry !== null)
+}
+
+function normalizeMcpResult(value: unknown): { content: unknown[]; structured_content: unknown } | undefined {
+  const record = ensureRecord(value, {})
+  if (Object.keys(record).length === 0) return undefined
+  const content = Array.isArray(record.content) ? record.content : []
+  return {
+    content,
+    structured_content: record.structured_content,
+  }
+}
+
+function normalizeMcpError(value: unknown): { message: string } | undefined {
+  const record = ensureRecord(value, {})
+  const message = toStringOrFallback(record.message, '').trim()
+  if (!message) return undefined
+  return { message }
 }
