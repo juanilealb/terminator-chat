@@ -805,6 +805,46 @@ function ToolCallCard({ message }: { message: ChatMessage }) {
   )
 }
 
+function formatLifecycleLabel(lifecycle: unknown): string {
+  if (lifecycle === 'turn.waiting_input') return 'Waiting for input'
+  if (lifecycle === 'turn.completed') return 'Completed'
+  if (lifecycle === 'turn.cancelled') return 'Cancelled'
+  if (lifecycle === 'turn.failed') return 'Failed'
+  if (lifecycle === 'error') return 'Error'
+  return 'Update'
+}
+
+function formatLifecycleClassName(lifecycle: unknown): string {
+  if (lifecycle === 'turn.completed') return styles.lifecycleSuccess
+  if (lifecycle === 'turn.waiting_input') return styles.lifecycleWaiting
+  if (lifecycle === 'turn.cancelled') return styles.lifecycleMuted
+  return ''
+}
+
+function LifecycleCard({ message }: { message: ChatMessage }) {
+  const lifecycle = message.metadata?.lifecycle
+  const usage = message.metadata?.usage as
+    | { input_tokens: number; cached_input_tokens: number; output_tokens: number }
+    | undefined
+
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={`${styles.lifecycleCard} ${formatLifecycleClassName(lifecycle)}`}>
+        <div className={styles.lifecycleHeader}>{formatLifecycleLabel(lifecycle)}</div>
+        <div className={styles.lifecycleText}>{message.content}</div>
+        {usage && (
+          <div className={styles.lifecycleUsage}>
+            <span>in {usage.input_tokens}</span>
+            <span>cached {usage.cached_input_tokens}</span>
+            <span>out {usage.output_tokens}</span>
+          </div>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
+
 function QuestionCard({
   question,
   timestamp,
@@ -873,6 +913,10 @@ function MessageBubble({
         <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
       </div>
     )
+  }
+
+  if (message.role === 'system' && message.metadata?.lifecycle && !message.metadata?.error) {
+    return <LifecycleCard message={message} />
   }
 
   // Error messages

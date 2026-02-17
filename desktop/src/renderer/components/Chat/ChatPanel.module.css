@@ -432,6 +432,50 @@
   padding: var(--space-1) var(--space-3);
 }
 
+.lifecycleCard {
+  background: color-mix(in srgb, var(--bg-elevated) 88%, #ffffff 12%);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-lg);
+  border-bottom-left-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+}
+
+.lifecycleHeader {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.lifecycleText {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.lifecycleUsage {
+  color: var(--text-tertiary);
+  display: flex;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.lifecycleSuccess {
+  border-color: color-mix(in srgb, var(--accent-green) 38%, var(--border-muted));
+}
+
+.lifecycleWaiting {
+  border-color: color-mix(in srgb, var(--accent-blue) 44%, var(--border-muted));
+}
+
+.lifecycleMuted {
+  opacity: 0.82;
+}
+
 /* Reasoning block */
 .reasoningBlock {
   background: var(--bg-surface);

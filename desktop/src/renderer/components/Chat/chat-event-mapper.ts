@@ -40,7 +40,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
       return {
         id: scopedId,
         role: 'system',
-        content: `Completed. Tokens: in ${data.usage.input_tokens} (cached ${data.usage.cached_input_tokens}), out ${data.usage.output_tokens}`,
+        content: 'Turn completed',
         type: 'text',
         timestamp,
         metadata: {
