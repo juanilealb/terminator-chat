@@ -495,10 +495,6 @@ interface AttachedImage {
   previewUrl: string
 }
 
-type ChatRenderItem =
-  | { kind: 'message'; message: ChatMessage }
-  | { kind: 'tool-calls'; key: string; messages: ChatMessage[] }
-
 function formatMessageTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], {
     hour: 'numeric',
@@ -678,41 +674,135 @@ function renderAssistantMarkdown(content: string): ReactNode {
   )
 }
 
-function isToolCallMessage(message: ChatMessage): boolean {
-  return message.type === 'command' || message.type === 'file-change' || message.type === 'tool-call'
+function formatStatusLabel(status: unknown): string {
+  if (status === 'completed') return 'Completed'
+  if (status === 'failed') return 'Failed'
+  if (status === 'in_progress') return 'Running'
+  return 'Pending'
 }
 
-function getToolCallText(message: ChatMessage): string {
-  if (message.type === 'tool-call') {
-    const toolName = (message.metadata?.tool_name as string | undefined)?.trim()
-    const server = (message.metadata?.server as string | undefined)?.trim()
-    const tool = (message.metadata?.tool as string | undefined)?.trim()
-    const query = (message.metadata?.query as string | undefined)?.trim()
-    const status = (message.metadata?.status as string | undefined)?.trim()
+function formatStatusClassName(status: unknown): string {
+  if (status === 'completed') return styles.exitCodeSuccess
+  if (status === 'failed') return styles.exitCodeFail
+  return ''
+}
 
-    if (server && tool) return `Tool call ${server}.${tool}${status ? ` (${status})` : ''}`
-    if (query) return `Web search "${query}"`
-    if (toolName) return `Tool call ${toolName}${status ? ` (${status})` : ''}`
-    return 'Tool call'
+function stringifyJsonSafe(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return '[unserializable]'
   }
+}
 
-  if (message.type === 'command') {
-    const toolName = (message.metadata?.tool_name as string | undefined)?.trim()
-    const command = (message.metadata?.command as string) ?? message.content
-    const trimmed = command.trim()
-    if (trimmed) return `Command run ${trimmed}`
-    if (toolName) return `Tool call ${toolName}`
-    return 'Tool call'
-  }
+function DetailSection({ label, value }: { label: string; value: unknown }) {
+  if (value == null) return null
+  const text = typeof value === 'string' ? value : stringifyJsonSafe(value)
+  if (!text.trim()) return null
+  return (
+    <details className={styles.toolDetailBlock}>
+      <summary className={styles.toolDetailSummary}>{label}</summary>
+      <pre className={styles.commandOutput}>{text}</pre>
+    </details>
+  )
+}
 
-  if (message.type === 'file-change') {
-    const changes = (message.metadata?.changes as Array<{ path: string; kind: string }>) ?? []
-    return changes.length > 0
-      ? `File changes (${changes.length})`
-      : 'File changes'
-  }
+function CommandCard({ message }: { message: ChatMessage }) {
+  const command = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
+  const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
+  const status = message.metadata?.status
+  const exitCode = message.metadata?.exit_code
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.commandBlock}>
+        <div className={styles.commandHeader}>
+          <span className={styles.commandLabel}>Command</span>
+          <span className={styles.commandText}>{command}</span>
+          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
+          {typeof exitCode === 'number' && (
+            <span className={`${styles.exitCode} ${exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
+              exit {exitCode}
+            </span>
+          )}
+        </div>
+        {output.trim() && (
+          <details className={styles.toolDetailBlock}>
+            <summary className={styles.toolDetailSummary}>Output</summary>
+            <pre className={styles.commandOutput}>{output}</pre>
+          </details>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
 
-  return message.content || 'Tool call'
+function FileChangeCard({ message }: { message: ChatMessage }) {
+  const changes = (message.metadata?.changes as Array<{ path: string; kind: string }> | undefined) ?? []
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.fileChangeBlock}>
+        <div className={styles.fileChangeHeader}>File changes ({changes.length})</div>
+        {changes.length > 0 ? (
+          <div className={styles.fileChangeList}>
+            {changes.map((change) => (
+              <div key={`${change.kind}:${change.path}`} className={styles.fileChangeItem}>
+                <span className={`${styles.fileChangeKind} ${
+                  change.kind === 'add'
+                    ? styles.fileChangeAdd
+                    : change.kind === 'delete'
+                      ? styles.fileChangeDelete
+                      : styles.fileChangeUpdate
+                }`}
+                >
+                  {change.kind}
+                </span>
+                <span>{change.path}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className={styles.reasoningContent}>No file changes reported.</div>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
+}
+
+function ToolCallCard({ message }: { message: ChatMessage }) {
+  const toolName = (message.metadata?.tool_name as string | undefined)?.trim() || 'tool-call'
+  const status = message.metadata?.status
+  const server = (message.metadata?.server as string | undefined)?.trim()
+  const tool = (message.metadata?.tool as string | undefined)?.trim()
+  const query = (message.metadata?.query as string | undefined)?.trim()
+  const itemCount = typeof message.metadata?.item_count === 'number' ? message.metadata.item_count : undefined
+  const completedCount = typeof message.metadata?.completed_count === 'number' ? message.metadata.completed_count : undefined
+  const title = server && tool ? `${server}.${tool}` : toolName
+  const subtitle = query
+    ? `Query: ${query}`
+    : typeof itemCount === 'number'
+      ? `Tasks: ${completedCount ?? 0}/${itemCount}`
+      : ''
+
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.toolCallCard}>
+        <div className={styles.toolCallHeader}>
+          <span className={styles.commandLabel}>Tool</span>
+          <span className={styles.commandText}>{title}</span>
+          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
+        </div>
+        {subtitle && <div className={styles.toolCallSubtitle}>{subtitle}</div>}
+        <DetailSection label="Arguments" value={message.metadata?.arguments} />
+        <DetailSection label="Result" value={message.metadata?.result} />
+        <DetailSection label="Items" value={message.metadata?.items} />
+        <DetailSection label="Raw payload" value={message.metadata?.raw} />
+        <DetailSection label="Error" value={message.metadata?.error} />
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+    </div>
+  )
 }
 
 function QuestionCard({
@@ -792,6 +882,18 @@ function MessageBubble({
     )
   }
 
+  if (message.type === 'command') {
+    return <CommandCard message={message} />
+  }
+
+  if (message.type === 'file-change') {
+    return <FileChangeCard message={message} />
+  }
+
+  if (message.type === 'tool-call') {
+    return <ToolCallCard message={message} />
+  }
+
   // Regular text messages
   const roleClass = message.role === 'user' ? styles.messageUser :
                     message.role === 'assistant' ? styles.messageAssistant :
@@ -823,27 +925,6 @@ function MessageBubble({
       {message.role === 'assistant' && (
         <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
       )}
-    </div>
-  )
-}
-
-function ToolCallsBlock({ messages }: { messages: ChatMessage[] }) {
-  return (
-    <div className={`${styles.message} ${styles.messageAssistant}`}>
-      <div className={styles.toolCallsBlock}>
-        <div className={styles.toolCallsHeader}>Tool calls ({messages.length})</div>
-        <div className={styles.toolCallsList}>
-          {messages.map((message) => (
-            <div key={message.id} className={styles.toolCallsItem}>
-              <span className={styles.toolCallsBullet}>*</span>
-              <span className={styles.toolCallsText}>{getToolCallText(message)}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className={styles.messageTime}>
-        {formatMessageTime(messages[messages.length - 1]!.timestamp)}
-      </div>
     </div>
   )
 }
@@ -931,35 +1012,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       window.removeEventListener('chat:insertPrompt', handler)
     }
   }, [threadId])
-
-  const renderItems = useMemo<ChatRenderItem[]>(() => {
-    if (messages.length === 0) return []
-
-    const items: ChatRenderItem[] = []
-    let currentToolMessages: ChatMessage[] = []
-
-    for (const message of messages) {
-      if (isToolCallMessage(message)) {
-        currentToolMessages.push(message)
-        continue
-      }
-
-      if (currentToolMessages.length > 0) {
-        const key = currentToolMessages.map((m) => m.id).join(':')
-        items.push({ kind: 'tool-calls', key, messages: currentToolMessages })
-        currentToolMessages = []
-      }
-
-      items.push({ kind: 'message', message })
-    }
-
-    if (currentToolMessages.length > 0) {
-      const key = currentToolMessages.map((m) => m.id).join(':')
-      items.push({ kind: 'tool-calls', key, messages: currentToolMessages })
-    }
-
-    return items
-  }, [messages])
 
   const activeProject = useMemo(
     () => (workspace ? projects.find((project) => project.id === workspace.projectId) : undefined),
@@ -1879,16 +1931,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         </div>
       ) : (
         <div className={styles.messages} ref={messagesContainerRef}>
-          {renderItems.map((item) => (
-            item.kind === 'message' ? (
-              <MessageBubble
-                key={item.message.id}
-                message={item.message}
-                onQuestionOptionSelect={handleQuestionOptionSelect}
-              />
-            ) : (
-              <ToolCallsBlock key={item.key} messages={item.messages} />
-            )
+          {messages.map((message) => (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onQuestionOptionSelect={handleQuestionOptionSelect}
+            />
           ))}
           {loading && <LoadingIndicator />}
           <div ref={messagesEndRef} />
