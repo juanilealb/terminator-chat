@@ -1174,13 +1174,28 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     return `${eventTurnSequenceRef.current}:${normalizedRawId}`
   }, [])
 
+  const toLifecycleMessageId = useCallback((eventType: string, eventTurnId?: string) => {
+    const turnScope = typeof eventTurnId === 'string' && eventTurnId.trim().length > 0
+      ? eventTurnId.trim()
+      : String(eventTurnSequenceRef.current || 0)
+    return `lifecycle:${turnScope}:${eventType}`
+  }, [])
+
   const appendChatMessage = useCallback((message: ChatMessage) => {
-    useAppStore.setState((state) => ({
-      chatMessages: {
-        ...state.chatMessages,
-        [threadId]: [...(state.chatMessages[threadId] ?? []), message],
-      },
-    }))
+    useAppStore.setState((state) => {
+      const existing = state.chatMessages[threadId] ?? []
+      const idx = existing.findIndex((entry) => entry.id === message.id)
+      const updated = idx >= 0
+        ? existing.map((entry, index) => (index === idx ? message : entry))
+        : [...existing, message]
+
+      return {
+        chatMessages: {
+          ...state.chatMessages,
+          [threadId]: updated,
+        },
+      }
+    })
   }, [threadId])
 
   const appendPlanCompletionCard = useCallback((turnId?: string) => {
@@ -1266,6 +1281,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       if (phase === 'turn.waiting_input') {
         setLoading(false)
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+        const waitingMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.waiting_input', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (waitingMessage) {
+          appendChatMessage(waitingMessage)
+        }
         notifyInactiveChatTab('waiting_input')
         return
       }
@@ -1316,22 +1340,20 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           }
         }
 
-        if (msg) {
-          useAppStore.setState((s) => {
-            const existing = s.chatMessages[threadId] ?? []
-            const idx = existing.findIndex((m) => m.id === msg.id)
-            const updated = idx >= 0
-              ? existing.map((m, i) => (i === idx ? msg : m))
-              : [...existing, msg]
-            return {
-              chatMessages: { ...s.chatMessages, [threadId]: updated },
-            }
-          })
-        }
+        if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'completed')
+        const completionMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.completed', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (completionMessage) {
+          appendChatMessage(completionMessage)
+        }
         notifyInactiveChatTab('completed')
         if (sessionMode === 'plan') {
           appendPlanCompletionCard(eventTurnId)
@@ -1340,26 +1362,28 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
+        const cancelledMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId('turn.cancelled', eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (cancelledMessage) {
+          appendChatMessage(cancelledMessage)
+        }
       } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
-        const message = typedData.type === 'error' || typedData.type === 'turn.failed'
-          ? typedData.message
-          : 'An error occurred'
-        useAppStore.setState((s) => ({
-          chatMessages: {
-            ...s.chatMessages,
-            [threadId]: [...(s.chatMessages[threadId] ?? []), {
-              id: crypto.randomUUID(),
-              role: 'system' as const,
-              content: message,
-              type: 'text' as const,
-              timestamp: Date.now(),
-              metadata: { error: true },
-            }],
-          },
-        }))
+        const failureMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: toLifecycleMessageId(phase, eventTurnId),
+          timestamp: Date.now(),
+        })
+        if (failureMessage) {
+          appendChatMessage(failureMessage)
+        }
       } else {
         // Forward-compatible fallback: if future SDK versions send question-like
         // top-level events, surface them as assistant messages.
@@ -1403,6 +1427,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     threadId,
     workspaceId,
     toScopedItemId,
+    toLifecycleMessageId,
     setChatThreadAgentStatus,
     notifyInactiveChatTab,
     appendChatMessage,

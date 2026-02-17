@@ -8,10 +8,69 @@ interface MapChatEventToMessageInput {
   timestamp: number
 }
 
+type ItemStatus = 'in_progress' | 'completed' | 'failed'
+
+function normalizeItemStatus(eventType: string, fallback: unknown): ItemStatus {
+  if (fallback === 'completed' || fallback === 'failed' || fallback === 'in_progress') {
+    return fallback
+  }
+  if (eventType === 'item.completed') return 'completed'
+  return 'in_progress'
+}
+
 export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMessage | null {
   const { data, eventType, scopedId, timestamp } = input
 
   switch (data.type) {
+    case 'thread.started':
+    case 'turn.started':
+      return null
+    case 'turn.waiting_input':
+      return {
+        id: scopedId,
+        role: 'system',
+        content: 'Waiting for your input',
+        type: 'text',
+        timestamp,
+        metadata: {
+          lifecycle: data.type,
+        },
+      }
+    case 'turn.completed':
+      return {
+        id: scopedId,
+        role: 'system',
+        content: `Completed. Tokens: in ${data.usage.input_tokens} (cached ${data.usage.cached_input_tokens}), out ${data.usage.output_tokens}`,
+        type: 'text',
+        timestamp,
+        metadata: {
+          lifecycle: data.type,
+          usage: data.usage,
+        },
+      }
+    case 'turn.cancelled':
+      return {
+        id: scopedId,
+        role: 'system',
+        content: 'Request cancelled',
+        type: 'text',
+        timestamp,
+        metadata: {
+          lifecycle: data.type,
+        },
+      }
+    case 'turn.failed':
+      return {
+        id: scopedId,
+        role: 'system',
+        content: data.message,
+        type: 'text',
+        timestamp,
+        metadata: {
+          error: true,
+          lifecycle: data.type,
+        },
+      }
     case 'agent_message':
       return {
         id: scopedId,
@@ -31,7 +90,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
           command: data.command,
           aggregated_output: data.aggregated_output,
           exit_code: data.exit_code,
-          status: data.status,
+          status: normalizeItemStatus(eventType, data.status),
         },
       }
     case 'file_change':
@@ -43,7 +102,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         timestamp,
         metadata: {
           changes: data.changes,
-          status: data.status,
+          status: normalizeItemStatus(eventType, data.status),
         },
       }
     case 'mcp_tool_call':
@@ -59,7 +118,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
           tool: data.tool,
           arguments: data.arguments,
           result: data.result,
-          status: data.status,
+          status: normalizeItemStatus(eventType, data.status),
           error: data.error?.message,
         },
       }
@@ -73,7 +132,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         metadata: {
           tool_name: data.type,
           query: data.query,
-          status: eventType === 'item.completed' ? 'completed' : 'in_progress',
+          status: normalizeItemStatus(eventType, undefined),
         },
       }
     case 'todo_list':
@@ -87,7 +146,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
           tool_name: data.type,
           item_count: data.items.length,
           completed_count: data.items.filter((item) => item.completed).length,
-          status: eventType === 'item.completed' ? 'completed' : 'in_progress',
+          status: normalizeItemStatus(eventType, undefined),
           items: data.items,
         },
       }
@@ -106,7 +165,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         content: data.message,
         type: 'text',
         timestamp,
-        metadata: { error: true },
+        metadata: { error: true, lifecycle: data.type },
       }
     case 'unknown_item':
       return {
@@ -117,7 +176,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         timestamp,
         metadata: {
           tool_name: data.item_type,
-          status: eventType === 'item.completed' ? 'completed' : 'in_progress',
+          status: normalizeItemStatus(eventType, undefined),
           raw: data.raw,
         },
       }
@@ -130,7 +189,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         timestamp,
         metadata: {
           tool_name: 'unknown_event',
-          status: 'in_progress',
+          status: normalizeItemStatus(eventType, undefined),
           raw: data.raw,
         },
       }
