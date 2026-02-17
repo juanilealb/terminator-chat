@@ -132,7 +132,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export interface Toast {
   id: string
   message: string
-  type: 'error' | 'info'
+  type: 'error' | 'info' | 'success'
 }
 
 export interface ConfirmDialogState {
@@ -189,6 +189,9 @@ export interface AppState {
   chatMessages: Record<string, ChatMessage[]>
   codexLoggedIn: boolean
   chatThread: ChatThread | null
+  _chatThreadStatusById: Record<string, { workspaceId: string; status: 'running' | 'waiting' }>
+  _fileWatcherRunningIds: Set<string>
+  _fileWatcherWaitingIds: Set<string>
 
   // Actions
   addProject: (project: Project) => void
@@ -252,6 +255,11 @@ export interface AppState {
   clearWorkspaceUnread: (workspaceId: string) => void
   setWorkspaceAgentStatus: (
     workspaceId: string,
+    status: 'running' | 'waiting' | 'idle' | 'completed',
+  ) => void
+  setChatThreadAgentStatus: (
+    workspaceId: string,
+    threadId: string,
     status: 'running' | 'waiting' | 'idle' | 'completed',
   ) => void
 

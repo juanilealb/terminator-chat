@@ -8,6 +8,12 @@
   gap: 10px;
 }
 
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .label {
   font-size: 11px;
   color: var(--colorNeutralForeground3);
@@ -29,4 +35,43 @@
 
 .input:focus {
   border-color: var(--colorBrandForeground1);
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: var(--borderRadiusMedium);
+  overflow: hidden;
+  width: fit-content;
+}
+
+.segment {
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground2);
+  border: 0;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--colorNeutralStroke1);
+}
+
+.segmentActive {
+  background: var(--colorBrandBackground2);
+  color: var(--colorNeutralForegroundOnBrand);
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--colorNeutralForeground2);
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--colorNeutralForeground3);
 }

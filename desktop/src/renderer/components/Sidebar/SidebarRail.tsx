@@ -1,9 +1,8 @@
 import { Fragment, useCallback, useMemo, useState } from 'react'
-import { basenameSafe, formatShortcut, toPosixPath } from '@shared/platform'
+import { formatShortcut } from '@shared/platform'
 import { SHORTCUT_MAP } from '@shared/shortcuts'
 import { useAppStore } from '../../store/app-store'
-import type { ProjectOwnership } from '../../store/types'
-import { AddProjectDialog } from './AddProjectDialog'
+import { AddProjectDialog, type AddProjectDialogSubmission } from './AddProjectDialog'
 import { Tooltip } from '../Tooltip/Tooltip'
 import styles from './SidebarRail.module.css'
 
@@ -20,8 +19,8 @@ interface WorkspaceWithState {
 }
 
 interface AddProjectDraft {
-  repoPath: string
-  name: string
+  initialName?: string
+  initialPath?: string
 }
 
 export function SidebarRail() {
@@ -39,6 +38,7 @@ export function SidebarRail() {
   const addProject = useAppStore((s) => s.addProject)
   const addToast = useAppStore((s) => s.addToast)
   const toggleSettings = useAppStore((s) => s.toggleSettings)
+  const settings = useAppStore((s) => s.settings)
   const defaultProjectOwnership = useAppStore((s) => s.settings.defaultProjectOwnership)
   const [addProjectDraft, setAddProjectDraft] = useState<AddProjectDraft | null>(null)
 
@@ -78,32 +78,71 @@ export function SidebarRail() {
     unreadWorkspaceIds,
   ])
 
-  const handleAddProject = useCallback(async () => {
-    const dirPath = await window.api.app.selectDirectory()
-    if (!dirPath) return
-    const existingProject = projects.find((project) => project.repoPath === dirPath)
-    if (existingProject) {
-      addToast({
+  const handleAddProject = useCallback(() => {
+    setAddProjectDraft({})
+  }, [])
+
+  const handleConfirmAddProject = useCallback(async (payload: AddProjectDialogSubmission) => {
+    if (!addProjectDraft) return
+
+    if (payload.mode === 'existing') {
+      const repoPath = (payload.existingPath ?? '').trim()
+      if (!repoPath) return
+      const validPath = await window.api.app.addProjectPath(repoPath)
+      if (!validPath) {
+        addToast({ id: crypto.randomUUID(), message: 'Folder not found.', type: 'error' })
+        return
+      }
+      const existingProject = projects.find((project) => project.repoPath === validPath)
+      if (existingProject) {
+        addToast({
+          id: crypto.randomUUID(),
+          message: `Project "${existingProject.name}" already exists.`,
+          type: 'info',
+        })
+        return
+      }
+      addProject({
         id: crypto.randomUUID(),
-        message: `Project "${existingProject.name}" already exists.`,
-        type: 'info',
+        name: payload.name,
+        repoPath: validPath,
+        ownership: payload.ownership,
       })
+      setAddProjectDraft(null)
       return
     }
-    const name = basenameSafe(toPosixPath(dirPath)) || dirPath
-    setAddProjectDraft({ repoPath: dirPath, name })
-  }, [addToast, projects])
 
-  const handleConfirmAddProject = useCallback((name: string, ownership: ProjectOwnership) => {
-    if (!addProjectDraft) return
-    addProject({
-      id: crypto.randomUUID(),
-      name,
-      repoPath: addProjectDraft.repoPath,
-      ownership,
-    })
-    setAddProjectDraft(null)
-  }, [addProject, addProjectDraft])
+    try {
+      const owner = payload.ownership === 'work'
+        ? (settings.githubWorkLogin.trim() || 'jleal-quintana')
+        : (settings.githubPersonalLogin.trim() || 'juanilealb')
+      const result = await window.api.app.createProject({
+        parentDir: payload.parentDir ?? '',
+        projectName: payload.name,
+        ownership: payload.ownership,
+        createRemote: payload.createRemote,
+        visibility: payload.visibility,
+        githubOwner: owner,
+      })
+      addProject({
+        id: crypto.randomUUID(),
+        name: payload.name,
+        repoPath: result.repoPath,
+        ownership: payload.ownership,
+      })
+      setAddProjectDraft(null)
+      addToast({
+        id: crypto.randomUUID(),
+        message: payload.createRemote
+          ? `Project "${payload.name}" created with GitHub remote.`
+          : `Project "${payload.name}" created locally.`,
+        type: 'success',
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create project'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+    }
+  }, [addProject, addProjectDraft, addToast, projects, settings.githubPersonalLogin, settings.githubWorkLogin])
 
   const handleNewThread = useCallback(() => {
     const targetProject = (activeProjectId && projects.find((project) => project.id === activeProjectId))
@@ -188,11 +227,11 @@ export function SidebarRail() {
 
       <div className={styles.actions}>
         <div className={styles.actionSlot}>
-          <Tooltip label="Add project">
+          <Tooltip label="New project">
             <button
               type="button"
               className={`${styles.sidebarToggle} ${styles.actionButton}`}
-              aria-label="Add project"
+              aria-label="New project"
               onClick={() => {
                 void handleAddProject()
               }}
@@ -221,9 +260,11 @@ export function SidebarRail() {
       {addProjectDraft && (
         <AddProjectDialog
           open
-          initialName={addProjectDraft.name}
-          repoPath={addProjectDraft.repoPath}
+          initialName={addProjectDraft.initialName}
+          initialPath={addProjectDraft.initialPath}
           initialOwnership={defaultProjectOwnership}
+          preferredPersonalLogin={settings.githubPersonalLogin}
+          preferredWorkLogin={settings.githubWorkLogin}
           onCancel={() => setAddProjectDraft(null)}
           onConfirm={handleConfirmAddProject}
         />

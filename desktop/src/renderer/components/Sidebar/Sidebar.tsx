@@ -1,16 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button, Divider } from "@fluentui/react-components";
-import { basenameSafe, formatShortcut, toPosixPath } from "@shared/platform";
+import { formatShortcut } from "@shared/platform";
+import { formatRelativeTime } from "../../utils/relative-time";
 import { SHORTCUT_MAP } from "@shared/shortcuts";
 import { DEFAULT_AGENT_PERMISSION_MODE } from "@shared/agent-permissions";
 import { useAppStore } from "../../store/app-store";
-import { DEFAULT_WORKSPACE_TYPE, type ChatMessage, type Project, type PrLinkProvider, type ProjectOwnership, type Tab, type WorkspaceType } from "../../store/types";
+import { DEFAULT_WORKSPACE_TYPE, type ChatMessage, type Project, type PrLinkProvider, type Tab, type WorkspaceType } from "../../store/types";
 import type { CreateWorktreeProgressEvent } from "../../../shared/workspace-creation";
 import type { OpenPrInfo, GithubLookupError } from "../../../shared/github-types";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { AddProjectDialog } from "./AddProjectDialog";
+import { AddProjectDialog, type AddProjectDialogSubmission } from "./AddProjectDialog";
 import { Tooltip } from "../Tooltip/Tooltip";
 import { getPreferredGithubLogin } from "../../utils/github-profile";
 import styles from "./Sidebar.module.css";
@@ -112,7 +113,6 @@ function normalizeThreadTitle(input: string): string {
 
 function getThreadDisplayName(
   tab: Extract<Tab, { type: "chat" }>,
-  workspace: { branch: string; name: string; worktreePath: string },
   messagesByThread: Record<string, ChatMessage[]>,
 ): string {
   const messages = messagesByThread[tab.threadId] ?? [];
@@ -120,9 +120,16 @@ function getThreadDisplayName(
     (message) => message.role === "user" && normalizeThreadTitle(message.content).length > 0,
   );
   if (firstUserMessage) return normalizeThreadTitle(firstUserMessage.content);
+  return "New thread";
+}
 
-  const fallbackBranch = workspace.branch || basenameSafe(workspace.worktreePath);
-  return fallbackBranch || workspace.name || "New thread";
+function getLatestMessageTimestamp(
+  threadId: string,
+  messagesByThread: Record<string, ChatMessage[]>,
+): number {
+  const messages = messagesByThread[threadId] ?? [];
+  if (messages.length === 0) return 0;
+  return Math.max(...messages.map((m) => m.timestamp));
 }
 
 function ghStatusHintMessage(error?: GithubLookupError): string | null {
@@ -156,8 +163,8 @@ interface WorkspaceCreationState {
 }
 
 interface AddProjectDraft {
-  repoPath: string;
-  name: string;
+  initialName?: string;
+  initialPath?: string;
 }
 
 function PrStateIcon({ state }: { state: "open" | "merged" | "closed" }) {
@@ -435,6 +442,7 @@ export function Sidebar() {
   const unreadWorkspaceIds = useAppStore((s) => s.unreadWorkspaceIds);
   const activeClaudeWorkspaceIds = useAppStore((s) => s.activeClaudeWorkspaceIds);
   const waitingClaudeWorkspaceIds = useAppStore((s) => s.waitingClaudeWorkspaceIds);
+  const chatThreadStatusById = useAppStore((s) => s._chatThreadStatusById);
   const completedClaudeWorkspaceIds = useAppStore((s) => s.completedClaudeWorkspaceIds);
   const renameWorkspace = useAppStore((s) => s.renameWorkspace);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
@@ -444,6 +452,7 @@ export function Sidebar() {
   const settings = useAppStore((s) => s.settings);
   const defaultProjectOwnership = useAppStore((s) => s.settings.defaultProjectOwnership);
 
+  const [now, setNow] = useState(Date.now());
   const [manualCollapsed, setManualCollapsed] = useState<Set<string>>(
     new Set(),
   );
@@ -488,6 +497,11 @@ export function Sidebar() {
       },
     );
     return unsub;
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -547,23 +561,9 @@ export function Sidebar() {
     if (openProjectPrPopoverId === id) closeProjectPrModal();
   }, [openProjectPrPopoverId, closeProjectPrModal]);
 
-  const handleAddProject = useCallback(async () => {
-    const dirPath = await window.api.app.selectDirectory();
-    if (!dirPath) return;
-
-    const existingProject = projects.find((project) => project.repoPath === dirPath);
-    if (existingProject) {
-      addToast({
-        id: crypto.randomUUID(),
-        message: `Project "${existingProject.name}" already exists.`,
-        type: "info",
-      });
-      return;
-    }
-
-    const name = basenameSafe(toPosixPath(dirPath)) || dirPath;
-    setAddProjectDraft({ repoPath: dirPath, name });
-  }, [addToast, projects]);
+  const handleAddProject = useCallback(() => {
+    setAddProjectDraft({});
+  }, []);
 
   const handleOpenProjectThreadDialog = useCallback((projectId: string) => {
     setNewThreadDialog({ projectId });
@@ -583,17 +583,76 @@ export function Sidebar() {
   }, [activeProjectId, addToast, openNewThreadDialog, projects, setNewThreadDialog]);
 
   const handleConfirmAddProject = useCallback(
-    (name: string, ownership: ProjectOwnership) => {
+    async (payload: AddProjectDialogSubmission) => {
       if (!addProjectDraft) return;
-      addProject({
-        id: crypto.randomUUID(),
-        name,
-        repoPath: addProjectDraft.repoPath,
-        ownership,
-      });
-      setAddProjectDraft(null);
+
+      if (payload.mode === "existing") {
+        const repoPath = (payload.existingPath ?? "").trim();
+        if (!repoPath) return;
+        const validPath = await window.api.app.addProjectPath(repoPath);
+        if (!validPath) {
+          addToast({
+            id: crypto.randomUUID(),
+            message: "Folder not found.",
+            type: "error",
+          });
+          return;
+        }
+        const existingProject = projects.find((project) => project.repoPath === validPath);
+        if (existingProject) {
+          addToast({
+            id: crypto.randomUUID(),
+            message: `Project "${existingProject.name}" already exists.`,
+            type: "info",
+          });
+          return;
+        }
+        addProject({
+          id: crypto.randomUUID(),
+          name: payload.name,
+          repoPath: validPath,
+          ownership: payload.ownership,
+        });
+        setAddProjectDraft(null);
+        return;
+      }
+
+      try {
+        const owner = payload.ownership === "work"
+          ? (settings.githubWorkLogin.trim() || "jleal-quintana")
+          : (settings.githubPersonalLogin.trim() || "juanilealb");
+        const result = await window.api.app.createProject({
+          parentDir: payload.parentDir ?? "",
+          projectName: payload.name,
+          ownership: payload.ownership,
+          createRemote: payload.createRemote,
+          visibility: payload.visibility,
+          githubOwner: owner,
+        });
+        addProject({
+          id: crypto.randomUUID(),
+          name: payload.name,
+          repoPath: result.repoPath,
+          ownership: payload.ownership,
+        });
+        setAddProjectDraft(null);
+        addToast({
+          id: crypto.randomUUID(),
+          message: payload.createRemote
+            ? `Project "${payload.name}" created with GitHub remote.`
+            : `Project "${payload.name}" created locally.`,
+          type: "success",
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to create project";
+        addToast({
+          id: crypto.randomUUID(),
+          message,
+          type: "error",
+        });
+      }
     },
-    [addProject, addProjectDraft],
+    [addProject, addProjectDraft, addToast, projects, settings.githubPersonalLogin, settings.githubWorkLogin],
   );
 
   const createThreadForWorkspace = useCallback(
@@ -1110,6 +1169,7 @@ export function Sidebar() {
                   &#x25B6;
                 </span>
                 <span className={styles.projectName}>{project.name}</span>
+                <span className={styles.threadCountBadge}>{projectThreads.length}</span>
                 <span className={styles.headerActions}>
                   <Tooltip label="Project settings">
                     <button
@@ -1149,60 +1209,53 @@ export function Sidebar() {
 
               {isExpanded && (
                 <div className={styles.workspaceList}>
-                  {projectThreads.length > 0 && (
-                    <div className={styles.threadTree}>
-                      {projectThreads.map(({ tab, workspace }) => {
-                        const displayName = getThreadDisplayName(tab, workspace, chatMessages);
-                        const metaBranch = workspace.branch || basenameSafe(workspace.worktreePath);
-                        const isRunning = activeClaudeWorkspaceIds.has(workspace.id);
-                        const isWaiting = !isRunning && waitingClaudeWorkspaceIds.has(workspace.id);
-                        const isCompleted = !isRunning && !isWaiting && completedClaudeWorkspaceIds.has(workspace.id);
-                        const isUnread = !isRunning && !isWaiting && !isCompleted && unreadWorkspaceIds.has(workspace.id);
+                  {projectThreads.map(({ tab, workspace }) => {
+                    const displayName = getThreadDisplayName(tab, chatMessages);
+                    const latestTs = getLatestMessageTimestamp(tab.threadId, chatMessages);
+                    const threadStatus = chatThreadStatusById[tab.threadId]?.status;
+                    const workspaceRunning = activeClaudeWorkspaceIds.has(workspace.id);
+                    const workspaceWaiting = waitingClaudeWorkspaceIds.has(workspace.id);
+                    const isRunning = threadStatus === 'running'
+                      || (!threadStatus && tab.id === activeTabId && workspaceRunning);
+                    const isWaiting = threadStatus === 'waiting'
+                      || (!threadStatus && tab.id === activeTabId && !isRunning && workspaceWaiting);
+                    const isCompleted = !isRunning && !isWaiting && completedClaudeWorkspaceIds.has(workspace.id);
+                    const isUnread = !isRunning && !isWaiting && !isCompleted && unreadWorkspaceIds.has(workspace.id);
 
-                        return (
-                          <div key={tab.id} className={styles.threadTreeRow}>
-                            <div
-                              className={`${styles.workspaceItem} ${
-                                tab.id === activeTabId ? styles.active : ""
-                              } ${isUnread ? styles.unread : ""} ${isCompleted ? styles.completed : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
-                              onClick={() => {
-                                setActiveWorkspace(workspace.id);
-                                setActiveTab(tab.id);
-                              }}
-                            >
-                              <span className={styles.workspaceIcon}>
-                                {"\u2387"}
-                              </span>
-                              <div className={styles.workspaceNameCol}>
-                                <span className={styles.workspaceName}>{displayName}</span>
-                                <WorkspaceMeta
-                                  projectId={workspace.projectId}
-                                  branch={metaBranch}
-                                  showBranch={true}
-                                />
-                              </div>
-                              <Tooltip label="Delete thread">
-                                <button
-                                  aria-label={`Delete thread ${displayName}`}
-                                  className={styles.workspaceDeleteBtn}
-                                  onClick={(e) =>
-                                    void handleDeleteThread(e, {
-                                      id: tab.id,
-                                      name: displayName,
-                                      workspaceId: workspace.id,
-                                      worktreePath: workspace.worktreePath,
-                                    })
-                                  }
-                                >
-                                  &#x2715;
-                                </button>
-                              </Tooltip>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                    return (
+                      <div
+                        key={tab.id}
+                        className={`${styles.workspaceItem} ${
+                          tab.id === activeTabId ? styles.active : ""
+                        } ${isUnread ? styles.unread : ""} ${isCompleted ? styles.completed : ""} ${isRunning ? styles.claudeActive : ""} ${isWaiting ? styles.waitingInput : ""}`}
+                        onClick={() => {
+                          setActiveWorkspace(workspace.id);
+                          setActiveTab(tab.id);
+                        }}
+                      >
+                        <span className={styles.threadName}>{displayName}</span>
+                        {latestTs > 0 && (
+                          <span className={styles.threadTime}>{formatRelativeTime(latestTs, now)}</span>
+                        )}
+                        <Tooltip label="Delete thread">
+                          <button
+                            aria-label={`Delete thread ${displayName}`}
+                            className={styles.workspaceDeleteBtn}
+                            onClick={(e) =>
+                              void handleDeleteThread(e, {
+                                id: tab.id,
+                                name: displayName,
+                                workspaceId: workspace.id,
+                                worktreePath: workspace.worktreePath,
+                              })
+                            }
+                          >
+                            &#x2715;
+                          </button>
+                        </Tooltip>
+                      </div>
+                    );
+                  })}
 
                   {projectThreads.length === 0 && (
                     <div className={styles.ghStatusHint}>
@@ -1233,14 +1286,14 @@ export function Sidebar() {
       </div>
 
       <div className={styles.actions}>
-        <Tooltip label="Add project">
+        <Tooltip label="New project">
           <Button
             appearance="subtle"
             className={styles.actionButton}
             onClick={handleAddProject}
             icon={<span className={`${styles.actionIcon} ${styles.footerActionIcon}`}>+</span>}
           >
-            Add project
+            New project
           </Button>
         </Tooltip>
         <Tooltip
@@ -1511,9 +1564,11 @@ export function Sidebar() {
       {addProjectDraft && (
         <AddProjectDialog
           open
-          initialName={addProjectDraft.name}
-          repoPath={addProjectDraft.repoPath}
+          initialName={addProjectDraft.initialName}
+          initialPath={addProjectDraft.initialPath}
           initialOwnership={defaultProjectOwnership}
+          preferredPersonalLogin={settings.githubPersonalLogin}
+          preferredWorkLogin={settings.githubWorkLogin}
           onCancel={() => setAddProjectDraft(null)}
           onConfirm={handleConfirmAddProject}
         />

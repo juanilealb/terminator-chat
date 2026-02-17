@@ -67,35 +67,32 @@ function TabPill({
 }) {
   const label = resolveTabLabel(tab)
   return (
-    <button
-      type="button"
+    <div
       className={`${styles.tabPill} ${isActive ? styles.tabPillActive : ''}`}
-      onClick={onSelect}
       title={tab.type === 'file' ? toPosixPath(tab.filePath) : label}
     >
-      <span className={styles.tabPillLabel}>{label}</span>
-      {tab.type === 'file' && tab.unsaved && <span className={styles.tabPillUnsavedDot} />}
+      <button
+        type="button"
+        className={styles.tabPillSelect}
+        onClick={onSelect}
+      >
+        <span className={styles.tabPillLabel}>{label}</span>
+        {tab.type === 'file' && tab.unsaved && <span className={styles.tabPillUnsavedDot} />}
+      </button>
       {onClose && (
-        <span
-          role="button"
-          tabIndex={0}
+        <button
+          type="button"
           className={styles.tabPillClose}
           onClick={(e) => {
             e.stopPropagation()
             onClose()
           }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.stopPropagation()
-              onClose()
-            }
-          }}
           aria-label={`Close ${label}`}
         >
           {'\u00d7'}
-        </span>
+        </button>
       )}
-    </button>
+    </div>
   )
 }
 
@@ -116,10 +113,15 @@ export function TabBar() {
     settings,
   } = useAppStore()
 
-  const activeTab = tabs.find((tab) => tab.id === activeTabId && tab.workspaceId === activeWorkspaceId)
+  const activeTab = tabs.find((tab) => tab.id === activeTabId)
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId)
+  const activeTabWorkspace = activeTab
+    ? workspaces.find((workspace) => workspace.id === activeTab.workspaceId)
+    : null
+  const editorTargetWorkspace = activeTabWorkspace ?? activeWorkspace
   const headerTitle = resolveHeaderTitle(activeTab, chatMessages)
   const wsTabs = tabs.filter((t) => t.workspaceId === activeWorkspaceId)
+  const nonChatTabs = wsTabs.filter((tab) => tab.type !== 'chat')
 
   const handleCloseTab = (tabId: string) => {
     const tab = tabs.find((t) => t.id === tabId)
@@ -141,15 +143,23 @@ export function TabBar() {
   }
 
   const handleOpenEditor = async (editor: 'vscode' | 'cursor') => {
-    if (!activeWorkspace?.worktreePath) {
+    if (!editorTargetWorkspace?.worktreePath) {
       addToast({ id: crypto.randomUUID(), message: 'Select a thread first', type: 'info' })
       return
     }
 
     try {
       const result = editor === 'vscode'
-        ? await window.api.app.openInVSCode(activeWorkspace.worktreePath)
-        : await window.api.app.openInCursor(activeWorkspace.worktreePath)
+        ? await window.api.app.openInVSCode(editorTargetWorkspace.worktreePath)
+        : await window.api.app.openInCursor(editorTargetWorkspace.worktreePath)
+      if (result.ok) {
+        addToast({
+          id: crypto.randomUUID(),
+          message: `Opening ${editor === 'vscode' ? 'VS Code' : 'Cursor'}...`,
+          type: 'info',
+        })
+        return
+      }
       if (!result.ok) {
         addToast({
           id: crypto.randomUUID(),
@@ -168,16 +178,16 @@ export function TabBar() {
 
   return (
     <div className={styles.tabBar}>
-      {wsTabs.length > 1 ? (
+      {nonChatTabs.length > 0 ? (
         <div className={styles.tabStripArea}>
           <div className={styles.tabStrip}>
-            {wsTabs.map((tab) => (
+            {nonChatTabs.map((tab) => (
               <TabPill
                 key={tab.id}
                 tab={tab}
                 isActive={tab.id === activeTabId}
                 onSelect={() => setActiveTab(tab.id)}
-                onClose={tab.type === 'chat' ? undefined : () => handleCloseTab(tab.id)}
+                onClose={() => handleCloseTab(tab.id)}
               />
             ))}
           </div>

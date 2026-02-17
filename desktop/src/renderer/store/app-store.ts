@@ -60,6 +60,37 @@ function formatUserError(err: unknown, fallback: string): string {
   return err.message.replace(invokePrefix, '') || fallback
 }
 
+type ChatThreadAgentStatus = { workspaceId: string; status: 'running' | 'waiting' }
+
+function getChatWorkspaceSets(
+  chatThreadStatusById: Record<string, ChatThreadAgentStatus>,
+): { running: Set<string>; waiting: Set<string> } {
+  const running = new Set<string>()
+  const waiting = new Set<string>()
+  for (const state of Object.values(chatThreadStatusById)) {
+    if (state.status === 'waiting') {
+      waiting.add(state.workspaceId)
+      continue
+    }
+    running.add(state.workspaceId)
+  }
+  for (const workspaceId of waiting) running.delete(workspaceId)
+  return { running, waiting }
+}
+
+function mergeWorkspaceAgentSets(
+  fwRunning: Set<string>,
+  fwWaiting: Set<string>,
+  chatThreadStatusById: Record<string, ChatThreadAgentStatus>,
+): { running: Set<string>; waiting: Set<string> } {
+  const chat = getChatWorkspaceSets(chatThreadStatusById)
+  const waiting = new Set([...fwWaiting, ...chat.waiting])
+  const running = new Set(
+    [...fwRunning, ...chat.running].filter((workspaceId) => !waiting.has(workspaceId)),
+  )
+  return { running, waiting }
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   projects: [],
   workspaces: [],
@@ -98,6 +129,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   chatMessages: {},
   codexLoggedIn: false,
   chatThread: null,
+  _chatThreadStatusById: {},
   _fileWatcherRunningIds: new Set<string>(),
   _fileWatcherWaitingIds: new Set<string>(),
 
@@ -129,6 +161,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       const completedClaudeWorkspaceIds = new Set(
         Array.from(s.completedClaudeWorkspaceIds).filter((wsId) => !removedWsIds.has(wsId)),
       )
+      const chatThreadStatusById = Object.fromEntries(
+        Object.entries(s._chatThreadStatusById).filter(
+          ([, value]) => !removedWsIds.has(value.workspaceId),
+        ),
+      )
+      const fileWatcherRunningIds = new Set(
+        [...s._fileWatcherRunningIds].filter((wsId) => !removedWsIds.has(wsId)),
+      )
+      const fileWatcherWaitingIds = new Set(
+        [...s._fileWatcherWaitingIds].filter((wsId) => !removedWsIds.has(wsId)),
+      )
       for (const wsId of removedWsIds) delete tabMap[wsId]
       return {
         projects: s.projects.filter((p) => p.id !== id),
@@ -137,6 +180,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeClaudeWorkspaceIds,
         waitingClaudeWorkspaceIds,
         completedClaudeWorkspaceIds,
+        _chatThreadStatusById: chatThreadStatusById,
+        _fileWatcherRunningIds: fileWatcherRunningIds,
+        _fileWatcherWaitingIds: fileWatcherWaitingIds,
         runningAgentCount: activeClaudeWorkspaceIds.size,
         waitingAgentCount: waitingClaudeWorkspaceIds.size,
         lastActiveTabByWorkspace: tabMap,
@@ -161,6 +207,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       newActiveClaude.delete(id)
       newWaitingClaude.delete(id)
       newCompletedClaude.delete(id)
+      const newFileWatcherRunning = new Set(s._fileWatcherRunningIds)
+      const newFileWatcherWaiting = new Set(s._fileWatcherWaitingIds)
+      newFileWatcherRunning.delete(id)
+      newFileWatcherWaiting.delete(id)
+      const chatThreadStatusById = Object.fromEntries(
+        Object.entries(s._chatThreadStatusById).filter(([, value]) => value.workspaceId !== id),
+      )
       const tabMap = { ...s.lastActiveTabByWorkspace }
       delete tabMap[id]
       return {
@@ -170,6 +223,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeClaudeWorkspaceIds: newActiveClaude,
         waitingClaudeWorkspaceIds: newWaitingClaude,
         completedClaudeWorkspaceIds: newCompletedClaude,
+        _chatThreadStatusById: chatThreadStatusById,
+        _fileWatcherRunningIds: newFileWatcherRunning,
+        _fileWatcherWaitingIds: newFileWatcherWaiting,
         runningAgentCount: newActiveClaude.size,
         waitingAgentCount: newWaitingClaude.size,
         lastActiveTabByWorkspace: tabMap,
@@ -241,16 +297,66 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   removeTab: (id) =>
     set((s) => {
+      const removedTab = s.tabs.find((t) => t.id === id)
       const newTabs = s.tabs.filter((t) => t.id !== id)
       const wasActive = s.activeTabId === id
       const wsTabs = newTabs.filter((t) => t.workspaceId === s.activeWorkspaceId)
+      const chatThreadStatusById = { ...s._chatThreadStatusById }
+      if (removedTab?.type === 'chat') {
+        delete chatThreadStatusById[removedTab.threadId]
+      }
+      const { running, waiting } = mergeWorkspaceAgentSets(
+        s._fileWatcherRunningIds,
+        s._fileWatcherWaitingIds,
+        chatThreadStatusById,
+      )
       return {
         tabs: newTabs,
+        _chatThreadStatusById: chatThreadStatusById,
+        activeClaudeWorkspaceIds: running,
+        waitingClaudeWorkspaceIds: waiting,
+        completedClaudeWorkspaceIds: new Set(
+          [...s.completedClaudeWorkspaceIds].filter(
+            (workspaceId) => !running.has(workspaceId) && !waiting.has(workspaceId),
+          ),
+        ),
+        runningAgentCount: running.size,
+        waitingAgentCount: waiting.size,
         activeTabId: wasActive ? (wsTabs[wsTabs.length - 1]?.id ?? null) : s.activeTabId,
       }
     }),
 
-  setActiveTab: (id) => set({ activeTabId: id }),
+  setActiveTab: (id) =>
+    set((s) => {
+      if (!id) return { activeTabId: null }
+
+      const tab = s.tabs.find((entry) => entry.id === id)
+      if (!tab) return {}
+
+      if (tab.workspaceId === s.activeWorkspaceId) {
+        return { activeTabId: id }
+      }
+
+      const tabMap = { ...s.lastActiveTabByWorkspace }
+      if (s.activeWorkspaceId && s.activeTabId) {
+        tabMap[s.activeWorkspaceId] = s.activeTabId
+      }
+      tabMap[tab.workspaceId] = id
+
+      const newUnread = new Set(s.unreadWorkspaceIds)
+      newUnread.delete(tab.workspaceId)
+
+      const newCompleted = new Set(s.completedClaudeWorkspaceIds)
+      newCompleted.delete(tab.workspaceId)
+
+      return {
+        activeTabId: id,
+        activeWorkspaceId: tab.workspaceId,
+        lastActiveTabByWorkspace: tabMap,
+        unreadWorkspaceIds: newUnread,
+        completedClaudeWorkspaceIds: newCompleted,
+      }
+    }),
 
   setRightPanelMode: (mode) => set({ rightPanelMode: mode }),
 
@@ -511,10 +617,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       const latest = get()
       const wsId = latest.activeWorkspaceId
       if (!wsId) return
-      set((state) => ({
-        tabs: state.tabs.filter((t) => t.workspaceId !== wsId),
-        activeTabId: null,
-      }))
+      set((state) => {
+        const removedThreadIds = state.tabs
+          .filter((t) => t.workspaceId === wsId && t.type === 'chat')
+          .map((t) => t.threadId)
+        const chatThreadStatusById = { ...state._chatThreadStatusById }
+        for (const threadId of removedThreadIds) delete chatThreadStatusById[threadId]
+        const { running, waiting } = mergeWorkspaceAgentSets(
+          state._fileWatcherRunningIds,
+          state._fileWatcherWaitingIds,
+          chatThreadStatusById,
+        )
+        return {
+          tabs: state.tabs.filter((t) => t.workspaceId !== wsId),
+          activeTabId: null,
+          _chatThreadStatusById: chatThreadStatusById,
+          activeClaudeWorkspaceIds: running,
+          waitingClaudeWorkspaceIds: waiting,
+          completedClaudeWorkspaceIds: new Set(
+            [...state.completedClaudeWorkspaceIds].filter(
+              (workspaceId) => !running.has(workspaceId) && !waiting.has(workspaceId),
+            ),
+          ),
+          runningAgentCount: running.size,
+          waitingAgentCount: waiting.size,
+        }
+      })
     }
 
     const wsTabs = s.tabs.filter((t) => t.workspaceId === s.activeWorkspaceId)
@@ -896,8 +1024,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       if (!workspaceId) return s
 
-      const activeClaudeWorkspaceIds = new Set(s.activeClaudeWorkspaceIds)
-      const waitingClaudeWorkspaceIds = new Set(s.waitingClaudeWorkspaceIds)
+      const merged = mergeWorkspaceAgentSets(
+        s._fileWatcherRunningIds,
+        s._fileWatcherWaitingIds,
+        s._chatThreadStatusById,
+      )
+      const activeClaudeWorkspaceIds = new Set(merged.running)
+      const waitingClaudeWorkspaceIds = new Set(merged.waiting)
       const completedClaudeWorkspaceIds = new Set(s.completedClaudeWorkspaceIds)
 
       if (status === 'running') {
@@ -911,7 +1044,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else if (status === 'completed') {
         activeClaudeWorkspaceIds.delete(workspaceId)
         waitingClaudeWorkspaceIds.delete(workspaceId)
-        if (workspaceId !== s.activeWorkspaceId) {
+        if (
+          workspaceId !== s.activeWorkspaceId
+          && !activeClaudeWorkspaceIds.has(workspaceId)
+          && !waitingClaudeWorkspaceIds.has(workspaceId)
+        ) {
           completedClaudeWorkspaceIds.add(workspaceId)
         } else {
           completedClaudeWorkspaceIds.delete(workspaceId)
@@ -931,6 +1068,50 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }),
 
+  setChatThreadAgentStatus: (workspaceId, threadId, status) =>
+    set((s) => {
+      if (!workspaceId || !threadId) return s
+
+      const chatThreadStatusById = { ...s._chatThreadStatusById }
+      if (status === 'running' || status === 'waiting') {
+        chatThreadStatusById[threadId] = { workspaceId, status }
+      } else {
+        delete chatThreadStatusById[threadId]
+      }
+
+      const merged = mergeWorkspaceAgentSets(
+        s._fileWatcherRunningIds,
+        s._fileWatcherWaitingIds,
+        chatThreadStatusById,
+      )
+      const completedClaudeWorkspaceIds = new Set(
+        [...s.completedClaudeWorkspaceIds].filter(
+          (id) => !merged.running.has(id) && !merged.waiting.has(id),
+        ),
+      )
+
+      if (
+        status === 'completed'
+        && workspaceId !== s.activeWorkspaceId
+        && !merged.running.has(workspaceId)
+        && !merged.waiting.has(workspaceId)
+      ) {
+        completedClaudeWorkspaceIds.add(workspaceId)
+      }
+      if (status === 'running' || status === 'waiting' || status === 'idle') {
+        completedClaudeWorkspaceIds.delete(workspaceId)
+      }
+
+      return {
+        _chatThreadStatusById: chatThreadStatusById,
+        activeClaudeWorkspaceIds: merged.running,
+        waitingClaudeWorkspaceIds: merged.waiting,
+        completedClaudeWorkspaceIds,
+        runningAgentCount: merged.running.size,
+        waitingAgentCount: merged.waiting.size,
+      }
+    }),
+
   setActiveClaudeWorkspaces: (workspaceIds) =>
     set((s) => ({
       activeClaudeWorkspaceIds: new Set(workspaceIds),
@@ -946,33 +1127,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const fwRunning = new Set(snapshot.runningWorkspaceIds)
       const fwWaiting = new Set(snapshot.waitingWorkspaceIds)
-      const previousFileWatcherIds = new Set([
-        ...s._fileWatcherRunningIds,
-        ...s._fileWatcherWaitingIds,
-      ])
-
-      // Keep IDs managed by ChatPanel (those not owned by previous file-watcher snapshot).
-      const chatRunning = [...s.activeClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
-      const chatWaiting = [...s.waitingClaudeWorkspaceIds].filter((id) => !previousFileWatcherIds.has(id))
-
-      const mergedWaiting = new Set([...fwWaiting, ...chatWaiting])
-      // Waiting for input has higher UX priority than running.
-      const mergedRunning = new Set(
-        [...fwRunning, ...chatRunning].filter((id) => !mergedWaiting.has(id)),
+      const merged = mergeWorkspaceAgentSets(
+        fwRunning,
+        fwWaiting,
+        s._chatThreadStatusById,
       )
 
       return {
         _fileWatcherRunningIds: fwRunning,
         _fileWatcherWaitingIds: fwWaiting,
-        activeClaudeWorkspaceIds: mergedRunning,
-        waitingClaudeWorkspaceIds: mergedWaiting,
+        activeClaudeWorkspaceIds: merged.running,
+        waitingClaudeWorkspaceIds: merged.waiting,
         completedClaudeWorkspaceIds: new Set(
           [...s.completedClaudeWorkspaceIds].filter(
-            (id) => !mergedRunning.has(id) && !mergedWaiting.has(id),
+            (id) => !merged.running.has(id) && !merged.waiting.has(id),
           ),
         ),
-        runningAgentCount: mergedRunning.size,
-        waitingAgentCount: mergedWaiting.size,
+        runningAgentCount: merged.running.size,
+        waitingAgentCount: merged.waiting.size,
       }
     }),
 

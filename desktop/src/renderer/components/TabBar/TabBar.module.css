@@ -64,6 +64,7 @@
     color var(--transition-fast),
     transform var(--transition-fast),
     box-shadow var(--transition-fast);
+  -webkit-app-region: no-drag;
 }
 
 .openPrimaryButton {
@@ -137,6 +138,7 @@
     color var(--transition-fast),
     transform var(--transition-fast),
     box-shadow var(--transition-fast);
+  -webkit-app-region: no-drag;
 }
 
 .edgeButton:hover {
@@ -195,9 +197,6 @@
   border-radius: var(--radius-full);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-family: var(--font-sans);
-  font-size: var(--font-size-xs);
-  cursor: pointer;
   flex-shrink: 0;
   transition:
     border-color var(--transition-fast),
@@ -208,6 +207,18 @@
 .tabPill:hover {
   border-color: var(--border-strong);
   color: var(--text-primary);
+}
+
+.tabPillSelect {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  -webkit-app-region: no-drag;
 }
 
 .tabPillActive {
@@ -249,6 +260,7 @@
   transition:
     background var(--transition-fast),
     color var(--transition-fast);
+  -webkit-app-region: no-drag;
 }
 
 .tabPillClose:hover {
