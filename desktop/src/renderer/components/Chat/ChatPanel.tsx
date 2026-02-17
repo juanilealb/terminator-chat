@@ -16,6 +16,8 @@ import {
   type ChatMessage,
 } from '../../store/types'
 import { consumeQueuedPromptInserts } from '../../utils/template-routing'
+import type { ChatEventData, ChatThreadItemData } from '../../../shared/ipc-channels'
+import { mapChatEventToMessage } from './chat-event-mapper'
 import styles from './ChatPanel.module.css'
 
 interface ChatPanelProps {
@@ -252,6 +254,15 @@ function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | un
     options,
     footer: pickTrimmedText(payload, 'footer') ?? undefined,
   }
+}
+
+function isThreadItemData(data: ChatEventData): data is ChatThreadItemData {
+  return 'id' in data && typeof data.id === 'string'
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
 }
 
 function looksInteractiveQuestionText(content: string): boolean {
@@ -1189,7 +1200,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       const realId = realThreadIdRef.current
       if (!realId || eventThreadId !== realId) return
 
-      const typedData = data as Record<string, unknown>
+      const typedData = data as ChatEventData
 
       if (phase === 'turn.started') {
         if (!activeTurnHasItemsRef.current) {
@@ -1209,144 +1220,46 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
       if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
         activeTurnHasItemsRef.current = true
-        const itemType = typedData.type as string
-        let msg: ChatMessage | null = null
-        const scopedId = toScopedItemId(typedData.id)
+        const timestamp = Date.now()
+        const scopedId = toScopedItemId(isThreadItemData(typedData) ? typedData.id : undefined)
+        let msg = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId,
+          timestamp,
+        })
 
-        if (itemType === 'agent_message') {
-          const text = (typedData.text as string) ?? ''
-          const parsedTextQuestion = parseInteractiveQuestionText(text)
-          if (parsedTextQuestion || looksInteractiveQuestionText(text)) {
+        if (typedData.type === 'agent_message') {
+          const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
+          if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
             setLoading(false)
             if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
             notifyInactiveChatTab('waiting_input')
           }
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: text,
-            type: 'text',
-            timestamp: Date.now(),
-            metadata: parsedTextQuestion
-              ? { interactiveQuestion: parsedTextQuestion }
-              : undefined,
-          }
-        } else if (itemType === 'command_execution') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: (typedData.command as string) ?? '',
-            type: 'command',
-            timestamp: Date.now(),
-            metadata: {
-              command: typedData.command,
-              aggregated_output: typedData.aggregated_output,
-              exit_code: typedData.exit_code,
-              status: typedData.status,
-            },
-          }
-        } else if (itemType === 'file_change') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: 'File changes',
-            type: 'file-change',
-            timestamp: Date.now(),
-            metadata: {
-              changes: typedData.changes,
-              status: typedData.status,
-            },
-          }
-        } else if (itemType === 'mcp_tool_call') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              server: typedData.server,
-              tool: typedData.tool,
-              arguments: typedData.arguments,
-              status: typedData.status,
-              error: typedData.error,
-            },
-          }
-        } else if (itemType === 'web_search') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              query: typedData.query,
-              status: type === 'item.completed' ? 'completed' : 'in_progress',
-            },
-          }
-        } else if (itemType === 'todo_list') {
-          const items = (typedData.items as Array<{ text?: string; completed?: boolean }> | undefined) ?? []
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: '',
-            type: 'tool-call',
-            timestamp: Date.now(),
-            metadata: {
-              tool_name: itemType,
-              item_count: items.length,
-              completed_count: items.filter((item) => item.completed).length,
-              status: type === 'item.completed' ? 'completed' : 'in_progress',
-            },
-          }
-        } else if (itemType === 'reasoning') {
-          msg = {
-            id: scopedId,
-            role: 'assistant',
-            content: (typedData.text as string) ?? '',
-            type: 'reasoning',
-            timestamp: Date.now(),
-          }
-        } else if (itemType === 'error') {
-          msg = {
-            id: scopedId,
-            role: 'system',
-            content: (typedData.message as string) ?? 'Unknown error',
-            type: 'text',
-            timestamp: Date.now(),
-            metadata: { error: true },
-          }
-        } else if (itemType) {
-          const interactiveQuestion = parseInteractiveQuestionPayload(typedData)
-          if (interactiveQuestion) {
-            setLoading(false)
-            if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
-            notifyInactiveChatTab('waiting_input')
+          if (msg && parsedTextQuestion) {
             msg = {
-              id: scopedId,
-              role: 'assistant',
-              content: toInteractiveQuestionText(interactiveQuestion),
-              type: 'text',
-              timestamp: Date.now(),
-              metadata: {
-                interactiveQuestion,
-              },
+              ...msg,
+              metadata: { interactiveQuestion: parsedTextQuestion },
             }
-          } else {
-            // Fallback for SDK item types we don't model yet: keep them visible
-            // in the tool-calls block instead of silently discarding them.
-            msg = {
-              id: scopedId,
-              role: 'assistant',
-              content: '',
-              type: 'tool-call',
-              timestamp: Date.now(),
-              metadata: {
-                tool_name: itemType,
-                status: typedData.status,
-              },
+          }
+        } else if (typedData.type === 'unknown_item') {
+          const raw = toRecord(typedData.raw)
+          if (raw) {
+            const interactiveQuestion = parseInteractiveQuestionPayload(raw)
+            if (interactiveQuestion) {
+              setLoading(false)
+              if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
+              notifyInactiveChatTab('waiting_input')
+              msg = {
+                id: scopedId,
+                role: 'assistant',
+                content: toInteractiveQuestionText(interactiveQuestion),
+                type: 'text',
+                timestamp,
+                metadata: {
+                  interactiveQuestion,
+                },
+              }
             }
           }
         }
@@ -1379,7 +1292,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         setLoading(false)
         activeTurnHasItemsRef.current = false
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'idle')
-        const message = (typedData.message as string) ?? 'An error occurred'
+        const message = typedData.type === 'error' || typedData.type === 'turn.failed'
+          ? typedData.message
+          : 'An error occurred'
         useAppStore.setState((s) => ({
           chatMessages: {
             ...s.chatMessages,
@@ -1396,7 +1311,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else {
         // Forward-compatible fallback: if future SDK versions send question-like
         // top-level events, surface them as assistant messages.
-        const interactiveQuestion = parseInteractiveQuestionPayload(typedData)
+        const topLevelPayload = typedData.type === 'unknown_event'
+          ? toRecord(typedData.raw)
+          : toRecord(typedData)
+
+        const interactiveQuestion = topLevelPayload
+          ? parseInteractiveQuestionPayload(topLevelPayload)
+          : null
         if (interactiveQuestion) {
           setLoading(false)
           if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
@@ -1411,6 +1332,17 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
               interactiveQuestion,
             },
           })
+          return
+        }
+
+        const fallbackMessage = mapChatEventToMessage({
+          data: typedData,
+          eventType: type,
+          scopedId: crypto.randomUUID(),
+          timestamp: Date.now(),
+        })
+        if (fallbackMessage) {
+          appendChatMessage(fallbackMessage)
         }
       }
     })
