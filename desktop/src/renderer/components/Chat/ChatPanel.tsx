@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Button,
   Dialog,
@@ -30,8 +30,10 @@ type DropdownOption = { value: string; label: string }
 type SessionMode = 'chat' | 'plan'
 type BranchScope = 'local' | 'origin'
 
+const SPARK_MODEL_OPTION: DropdownOption = { value: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark' }
 const FALLBACK_MODEL_OPTIONS: DropdownOption[] = [
   { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
+  SPARK_MODEL_OPTION,
   { value: 'gpt-5.2-codex', label: 'gpt-5.2-codex' },
   { value: 'gpt-5.1-codex-max', label: 'gpt-5.1-codex-max' },
   { value: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini' },
@@ -68,6 +70,33 @@ interface ParsedInteractiveQuestion {
   prompt: string
   options: ParsedQuestionOption[]
   footer?: string
+}
+
+const PLAN_ACTION_EXECUTE_ID = 'plan-execute-now'
+const PLAN_ACTION_REFINE_ID = 'plan-refine'
+const PLAN_ACTION_EXECUTE_LABEL = 'Start implementation now'
+const PLAN_ACTION_REFINE_LABEL = 'Keep planning'
+const PLAN_EXECUTE_PROMPT = 'Implement the approved plan now. Start with phase 1 and apply changes directly.'
+const PLAN_REFINE_PROMPT = 'Keep planning. Refine the implementation plan with concrete steps, risks, and validation for each phase.'
+const DEFAULT_QUESTION_FOOTER = 'Select an option, then press Enter to submit your answer.'
+const PLAN_COMPLETION_QUESTION: ParsedInteractiveQuestion = {
+  header: 'Plan complete',
+  prompt: 'The plan is ready. What should I do next?',
+  options: [
+    {
+      id: PLAN_ACTION_EXECUTE_ID,
+      index: 1,
+      label: PLAN_ACTION_EXECUTE_LABEL,
+      detail: 'Exit plan mode and execute changes now',
+    },
+    {
+      id: PLAN_ACTION_REFINE_ID,
+      index: 2,
+      label: PLAN_ACTION_REFINE_LABEL,
+      detail: 'Stay in plan mode and keep refining',
+    },
+  ],
+  footer: 'Pick one option to continue.',
 }
 
 const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
@@ -114,36 +143,115 @@ function formatUserError(err: unknown, fallback: string): string {
   return err.message.replace(invokePrefix, '') || fallback
 }
 
-function getInteractiveQuestion(payload: Record<string, unknown>): string | null {
-  const pickText = (...keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = payload[key]
-      if (typeof value === 'string' && value.trim()) return value.trim()
-    }
-    return null
+function pickTrimmedText(payload: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
   }
+  return null
+}
 
-  const prompt = pickText('question', 'prompt', 'text')
+function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
+  const lines: string[] = []
+  if (question.header) lines.push(question.header)
+  lines.push(question.prompt)
+  lines.push('')
+  for (const option of question.options) {
+    lines.push(option.detail
+      ? `${option.index}. ${option.label} - ${option.detail}`
+      : `${option.index}. ${option.label}`)
+  }
+  if (question.footer) {
+    lines.push('')
+    lines.push(question.footer)
+  }
+  return lines.join('\n')
+}
+
+function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
+  const prompt = pickTrimmedText(payload, 'question', 'prompt', 'text')
   if (!prompt) return null
 
-  const optionsRaw = payload.options
-  if (!Array.isArray(optionsRaw) || optionsRaw.length === 0) return prompt
+  const optionsRaw = Array.isArray(payload.options)
+    ? payload.options
+    : Array.isArray(payload.choices)
+      ? payload.choices
+      : null
+  if (!optionsRaw || optionsRaw.length === 0) return null
 
-  const optionLines = optionsRaw
-    .map((option, index) => {
-      if (!option || typeof option !== 'object') return `${index + 1}. Option ${index + 1}`
-      const entry = option as Record<string, unknown>
-      const label = typeof entry.label === 'string' && entry.label.trim()
-        ? entry.label.trim()
-        : `Option ${index + 1}`
-      const description = typeof entry.description === 'string' && entry.description.trim()
-        ? entry.description.trim()
-        : ''
-      return description ? `${index + 1}. ${label} - ${description}` : `${index + 1}. ${label}`
+  const options: ParsedQuestionOption[] = []
+  for (let i = 0; i < optionsRaw.length; i += 1) {
+    const option = optionsRaw[i]
+    if (typeof option === 'string' && option.trim()) {
+      const label = option.trim()
+      options.push({ id: `opt-${i + 1}-${label}`, index: i + 1, label })
+      continue
+    }
+    if (!option || typeof option !== 'object') continue
+    const entry = option as Record<string, unknown>
+    const label = pickTrimmedText(entry, 'label', 'value', 'name')
+    if (!label) continue
+    const detail = pickTrimmedText(entry, 'description', 'detail')
+    const id = pickTrimmedText(entry, 'id')
+      ?? `opt-${i + 1}-${label}`
+    options.push({
+      id,
+      index: i + 1,
+      label,
+      detail: detail ?? undefined,
     })
-    .join('\n')
+  }
 
-  return `${prompt}\n\n${optionLines}`
+  if (options.length === 0) return null
+
+  return {
+    header: pickTrimmedText(payload, 'header', 'title') ?? undefined,
+    prompt,
+    options,
+    footer: pickTrimmedText(payload, 'footer', 'hint') ?? undefined,
+  }
+}
+
+function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | undefined): ParsedInteractiveQuestion | null {
+  if (!metadata) return null
+  const raw = metadata.interactiveQuestion
+  if (!raw || typeof raw !== 'object') return null
+
+  const payload = raw as Record<string, unknown>
+  const prompt = pickTrimmedText(payload, 'prompt')
+  const optionsRaw = payload.options
+  if (!prompt || !Array.isArray(optionsRaw) || optionsRaw.length === 0) return null
+
+  const options: ParsedQuestionOption[] = []
+  for (let i = 0; i < optionsRaw.length; i += 1) {
+    const option = optionsRaw[i]
+    if (!option || typeof option !== 'object') continue
+    const entry = option as Record<string, unknown>
+    const label = pickTrimmedText(entry, 'label')
+    const id = pickTrimmedText(entry, 'id')
+    const rawIndex = entry.index
+    const parsedIndex = typeof rawIndex === 'number'
+      ? rawIndex
+      : typeof rawIndex === 'string'
+        ? Number.parseInt(rawIndex, 10)
+        : Number.NaN
+    if (!label || !id) continue
+    options.push({
+      id,
+      label,
+      index: Number.isFinite(parsedIndex) ? parsedIndex : i + 1,
+      detail: pickTrimmedText(entry, 'detail') ?? undefined,
+    })
+  }
+
+  if (options.length === 0) return null
+
+  return {
+    header: pickTrimmedText(payload, 'header') ?? undefined,
+    prompt,
+    options,
+    footer: pickTrimmedText(payload, 'footer') ?? undefined,
+  }
 }
 
 function looksInteractiveQuestionText(content: string): boolean {
@@ -227,6 +335,14 @@ function parseInteractiveQuestionText(content: string): ParsedInteractiveQuestio
     options,
     footer: footerLines.length > 0 ? footerLines.join(' | ') : undefined,
   }
+}
+
+function mergeModelOptionsWithRequired(options: DropdownOption[]): DropdownOption[] {
+  const merged = [...options]
+  if (!merged.some((option) => option.value === SPARK_MODEL_OPTION.value)) {
+    merged.push(SPARK_MODEL_OPTION)
+  }
+  return merged
 }
 
 function ToolbarDropdown({
@@ -381,6 +497,176 @@ function formatMessageTime(timestamp: number): string {
   })
 }
 
+interface MarkdownTextBlock {
+  kind: 'text'
+  text: string
+}
+
+interface MarkdownCodeBlock {
+  kind: 'code'
+  lang: string
+  code: string
+}
+
+type MarkdownBlock = MarkdownTextBlock | MarkdownCodeBlock
+
+function parseMarkdownBlocks(content: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = []
+  const fenceRe = /```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g
+  let cursor = 0
+
+  for (const match of content.matchAll(fenceRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      const text = content.slice(cursor, start)
+      if (text.trim().length > 0) blocks.push({ kind: 'text', text })
+    }
+
+    blocks.push({
+      kind: 'code',
+      lang: (match[1] ?? '').trim(),
+      code: (match[2] ?? '').replace(/\n$/, ''),
+    })
+    cursor = end
+  }
+
+  if (cursor < content.length) {
+    const text = content.slice(cursor)
+    if (text.trim().length > 0) blocks.push({ kind: 'text', text })
+  }
+
+  if (blocks.length === 0) return [{ kind: 'text', text: content }]
+  return blocks
+}
+
+function renderBoldSegments(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const boldRe = /\*\*([^*]+)\*\*/g
+  let cursor = 0
+  let index = 0
+
+  for (const match of text.matchAll(boldRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      nodes.push(
+        <span key={`${keyPrefix}-plain-${index}`}>{text.slice(cursor, start)}</span>,
+      )
+      index += 1
+    }
+
+    nodes.push(
+      <strong key={`${keyPrefix}-bold-${index}`} className={styles.markdownStrong}>
+        {match[1]}
+      </strong>,
+    )
+    index += 1
+    cursor = end
+  }
+
+  if (cursor < text.length) {
+    nodes.push(
+      <span key={`${keyPrefix}-tail-${index}`}>{text.slice(cursor)}</span>,
+    )
+  }
+
+  return nodes
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const codeRe = /`([^`\n]+)`/g
+  let cursor = 0
+  let index = 0
+
+  for (const match of text.matchAll(codeRe)) {
+    const start = match.index ?? 0
+    const end = start + (match[0]?.length ?? 0)
+
+    if (start > cursor) {
+      nodes.push(...renderBoldSegments(text.slice(cursor, start), `${keyPrefix}-seg-${index}`))
+      index += 1
+    }
+
+    nodes.push(
+      <code key={`${keyPrefix}-code-${index}`} className={styles.markdownInlineCode}>
+        {match[1]}
+      </code>,
+    )
+    index += 1
+    cursor = end
+  }
+
+  if (cursor < text.length) {
+    nodes.push(...renderBoldSegments(text.slice(cursor), `${keyPrefix}-tail-${index}`))
+  }
+
+  return nodes
+}
+
+function renderTextParagraph(paragraph: string, key: string): ReactNode {
+  const lines = paragraph
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (lines.length > 0 && lines.every((line) => /^[-*]\s+/.test(line))) {
+    return (
+      <ul key={key} className={styles.markdownList}>
+        {lines.map((line, idx) => (
+          <li key={`${key}-li-${idx}`}>{renderInlineMarkdown(line.replace(/^[-*]\s+/, ''), `${key}-li-${idx}`)}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  if (lines.length > 0 && lines.every((line) => /^\d+\.\s+/.test(line))) {
+    return (
+      <ol key={key} className={styles.markdownList}>
+        {lines.map((line, idx) => (
+          <li key={`${key}-li-${idx}`}>{renderInlineMarkdown(line.replace(/^\d+\.\s+/, ''), `${key}-li-${idx}`)}</li>
+        ))}
+      </ol>
+    )
+  }
+
+  return (
+    <p key={key} className={styles.markdownParagraph}>
+      {renderInlineMarkdown(paragraph, key)}
+    </p>
+  )
+}
+
+function renderAssistantMarkdown(content: string): ReactNode {
+  const blocks = parseMarkdownBlocks(content)
+
+  return (
+    <div className={styles.markdownRoot}>
+      {blocks.map((block, blockIndex) => {
+        if (block.kind === 'code') {
+          return (
+            <div key={`code-${blockIndex}`} className={styles.markdownCodeWrapper}>
+              {block.lang && <div className={styles.markdownCodeLang}>{block.lang}</div>}
+              <pre className={styles.markdownCodeBlock}>
+                <code>{block.code}</code>
+              </pre>
+            </div>
+          )
+        }
+
+        return block.text
+          .split(/\n{2,}/)
+          .map((paragraph, paragraphIndex) =>
+            renderTextParagraph(paragraph, `text-${blockIndex}-${paragraphIndex}`),
+          )
+      })}
+    </div>
+  )
+}
+
 function isToolCallMessage(message: ChatMessage): boolean {
   return message.type === 'command' || message.type === 'file-change' || message.type === 'tool-call'
 }
@@ -425,7 +711,7 @@ function QuestionCard({
 }: {
   question: ParsedInteractiveQuestion
   timestamp: number
-  onSelect: (answer: string) => void
+  onSelect: (answer: string, optionId: string) => void
 }) {
   return (
     <div className={`${styles.message} ${styles.messageAssistant}`}>
@@ -438,7 +724,7 @@ function QuestionCard({
               key={option.id}
               type="button"
               className={styles.questionOption}
-              onClick={() => onSelect(option.label)}
+              onClick={() => onSelect(option.label, option.id)}
             >
               <span className={styles.questionOptionIndex}>{option.index}.</span>
               <span className={styles.questionOptionBody}>
@@ -449,7 +735,7 @@ function QuestionCard({
           ))}
         </div>
         <div className={styles.questionFooter}>
-          {question.footer ?? 'Select an option, then press Enter to submit your answer.'}
+          {question.footer ?? DEFAULT_QUESTION_FOOTER}
         </div>
       </div>
       <div className={styles.messageTime}>{formatMessageTime(timestamp)}</div>
@@ -462,7 +748,7 @@ function MessageBubble({
   onQuestionOptionSelect,
 }: {
   message: ChatMessage
-  onQuestionOptionSelect: (answer: string) => void
+  onQuestionOptionSelect: (answer: string, optionId: string) => void
 }) {
   const [reasoningOpen, setReasoningOpen] = useState(false)
 
@@ -504,7 +790,7 @@ function MessageBubble({
   if (!isUser && !content) return null
 
   if (message.role === 'assistant' && message.type === 'text') {
-    const parsedQuestion = parseInteractiveQuestionText(content)
+    const parsedQuestion = parseInteractiveQuestionMetadata(message.metadata) ?? parseInteractiveQuestionText(content)
     if (parsedQuestion) {
       return (
         <QuestionCard
@@ -521,7 +807,7 @@ function MessageBubble({
       {isUser ? (
         <div className={`${styles.bubble} ${styles.bubbleUser}`}>{message.content}</div>
       ) : (
-        <div className={styles.assistantText}>{message.content}</div>
+        <div className={styles.assistantText}>{renderAssistantMarkdown(message.content)}</div>
       )}
       {message.role === 'assistant' && (
         <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
@@ -773,11 +1059,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     listModels()
       .then((options) => {
         if (cancelled || options.length === 0) return
-        setModelOptions(options)
+        const mergedOptions = mergeModelOptionsWithRequired(options)
+        setModelOptions(mergedOptions)
         setModel((current) => (
-          options.some((option) => option.value === current)
+          mergedOptions.some((option) => option.value === current)
             ? current
-            : options[0]!.value
+            : mergedOptions[0]!.value
         ))
       })
       .catch((err) => {
@@ -824,17 +1111,47 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     return `${eventTurnSequenceRef.current}:${normalizedRawId}`
   }, [])
 
-  const handleQuestionOptionSelect = useCallback((answer: string) => {
-    setInput(answer)
-    setLoading(false)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (!el) return
-      el.focus()
-      el.style.height = 'auto'
-      el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+  const appendChatMessage = useCallback((message: ChatMessage) => {
+    useAppStore.setState((state) => ({
+      chatMessages: {
+        ...state.chatMessages,
+        [threadId]: [...(state.chatMessages[threadId] ?? []), message],
+      },
+    }))
+  }, [threadId])
+
+  const appendPlanCompletionCard = useCallback((turnId?: string) => {
+    useAppStore.setState((state) => {
+      const existing = state.chatMessages[threadId] ?? []
+      const alreadyShown = existing.some((message) => (
+        message.role === 'assistant'
+        && message.type === 'text'
+        && message.metadata?.planCompletionCard === true
+        && (!turnId || message.metadata?.turnId === turnId)
+      ))
+      if (alreadyShown) return {}
+
+      const cardMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: toInteractiveQuestionText(PLAN_COMPLETION_QUESTION),
+        type: 'text',
+        timestamp: Date.now(),
+        metadata: {
+          interactiveQuestion: PLAN_COMPLETION_QUESTION,
+          planCompletionCard: true,
+          turnId: turnId ?? '',
+        },
+      }
+
+      return {
+        chatMessages: {
+          ...state.chatMessages,
+          [threadId]: [...existing, cardMessage],
+        },
+      }
     })
-  }, [])
+  }, [threadId])
 
   const notifyInactiveChatTab = useCallback((reason: 'waiting_input' | 'completed') => {
     if (!workspaceId) return
@@ -868,7 +1185,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   // Listen for chat events from main process
   useEffect(() => {
     const unsub = window.api.chat.onEvent((event) => {
-      const { threadId: eventThreadId, type, phase, data } = event
+      const { threadId: eventThreadId, type, phase, data, turnId: eventTurnId } = event
       const realId = realThreadIdRef.current
       if (!realId || eventThreadId !== realId) return
 
@@ -898,7 +1215,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
         if (itemType === 'agent_message') {
           const text = (typedData.text as string) ?? ''
-          if (looksInteractiveQuestionText(text)) {
+          const parsedTextQuestion = parseInteractiveQuestionText(text)
+          if (parsedTextQuestion || looksInteractiveQuestionText(text)) {
             setLoading(false)
             if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
             notifyInactiveChatTab('waiting_input')
@@ -909,6 +1227,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             content: text,
             type: 'text',
             timestamp: Date.now(),
+            metadata: parsedTextQuestion
+              ? { interactiveQuestion: parsedTextQuestion }
+              : undefined,
           }
         } else if (itemType === 'command_execution') {
           msg = {
@@ -998,7 +1319,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             metadata: { error: true },
           }
         } else if (itemType) {
-          const interactiveQuestion = getInteractiveQuestion(typedData)
+          const interactiveQuestion = parseInteractiveQuestionPayload(typedData)
           if (interactiveQuestion) {
             setLoading(false)
             if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
@@ -1006,9 +1327,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             msg = {
               id: scopedId,
               role: 'assistant',
-              content: interactiveQuestion,
+              content: toInteractiveQuestionText(interactiveQuestion),
               type: 'text',
               timestamp: Date.now(),
+              metadata: {
+                interactiveQuestion,
+              },
             }
           } else {
             // Fallback for SDK item types we don't model yet: keep them visible
@@ -1044,6 +1368,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         activeTurnHasItemsRef.current = false
         if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'completed')
         notifyInactiveChatTab('completed')
+        if (sessionMode === 'plan') {
+          appendPlanCompletionCard(eventTurnId)
+        }
       } else if (phase === 'turn.cancelled') {
         setLoading(false)
         activeTurnHasItemsRef.current = false
@@ -1069,28 +1396,35 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       } else {
         // Forward-compatible fallback: if future SDK versions send question-like
         // top-level events, surface them as assistant messages.
-        const interactiveQuestion = getInteractiveQuestion(typedData)
+        const interactiveQuestion = parseInteractiveQuestionPayload(typedData)
         if (interactiveQuestion) {
           setLoading(false)
           if (workspaceId) setChatThreadAgentStatus(workspaceId, threadId, 'waiting')
           notifyInactiveChatTab('waiting_input')
-          useAppStore.setState((s) => ({
-            chatMessages: {
-              ...s.chatMessages,
-              [threadId]: [...(s.chatMessages[threadId] ?? []), {
-                id: crypto.randomUUID(),
-                role: 'assistant' as const,
-                content: interactiveQuestion,
-                type: 'text' as const,
-                timestamp: Date.now(),
-              }],
+          appendChatMessage({
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: toInteractiveQuestionText(interactiveQuestion),
+            type: 'text',
+            timestamp: Date.now(),
+            metadata: {
+              interactiveQuestion,
             },
-          }))
+          })
         }
       }
     })
     return unsub
-  }, [threadId, workspaceId, toScopedItemId, setChatThreadAgentStatus, notifyInactiveChatTab])
+  }, [
+    threadId,
+    workspaceId,
+    toScopedItemId,
+    setChatThreadAgentStatus,
+    notifyInactiveChatTab,
+    appendChatMessage,
+    appendPlanCompletionCard,
+    sessionMode,
+  ])
 
   const handleLogin = useCallback(async () => {
     setLoginLoading(true)
@@ -1107,11 +1441,18 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
   }, [setCodexLoggedIn])
 
-  const handleSend = useCallback(async () => {
-    const trimmed = input.trim()
-    if ((!trimmed && attachedImages.length === 0) || !worktreePath) return
+  const handleSend = useCallback(async (overrides?: {
+    text?: string
+    mode?: SessionMode
+    images?: AttachedImage[]
+  }) => {
+    const text = overrides?.text ?? input
+    const images = overrides?.images ?? attachedImages
+    const trimmed = text.trim()
+    if ((!trimmed && images.length === 0) || !worktreePath) return
 
-    const isPlanMode = sessionMode === 'plan'
+    const effectiveMode = overrides?.mode ?? sessionMode
+    const isPlanMode = effectiveMode === 'plan'
     const planPrompt = trimmed
       ? `${PLAN_MODE_PREFIX}\n\nUser request:\n${trimmed}`
       : `${PLAN_MODE_PREFIX}\n\nAnalyze the attached image(s) and provide a plan.`
@@ -1166,7 +1507,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: trimmed || (attachedImages.length > 0 ? `[${attachedImages.length} image(s)]` : ''),
+      content: trimmed || (images.length > 0 ? `[${images.length} image(s)]` : ''),
       type: 'text',
       timestamp: Date.now(),
     }
@@ -1189,12 +1530,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     // Build input payload
     let sendInput: string | Array<{ type: string; text?: string; path?: string }>
-    if (attachedImages.length > 0) {
+    if (images.length > 0) {
       const parts: Array<{ type: string; text?: string; path?: string }> = []
       if (isPlanMode || trimmed) {
         parts.push({ type: 'text', text: isPlanMode ? planPrompt : trimmed })
       }
-      for (const img of attachedImages) {
+      for (const img of images) {
         parts.push({ type: 'local_image', path: img.path })
       }
       sendInput = parts
@@ -1222,7 +1563,53 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         },
       }))
     }
-  }, [input, worktreePath, threadId, workspaceId, workspace?.name, model, effort, attachedImages, sessionMode, agentPermissionMode, setChatThreadAgentStatus])
+  }, [
+    input,
+    worktreePath,
+    threadId,
+    workspaceId,
+    workspace?.name,
+    model,
+    effort,
+    attachedImages,
+    sessionMode,
+    agentPermissionMode,
+    setChatThreadAgentStatus,
+  ])
+
+  const handleQuestionOptionSelect = useCallback((answer: string, optionId: string) => {
+    setLoading(false)
+
+    if (optionId === PLAN_ACTION_EXECUTE_ID) {
+      setSessionMode('chat')
+      resetRuntimeThreadState()
+      void handleSend({
+        text: PLAN_EXECUTE_PROMPT,
+        mode: 'chat',
+        images: [],
+      })
+      return
+    }
+
+    if (optionId === PLAN_ACTION_REFINE_ID) {
+      setSessionMode('plan')
+      void handleSend({
+        text: PLAN_REFINE_PROMPT,
+        mode: 'plan',
+        images: [],
+      })
+      return
+    }
+
+    setInput(answer)
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.style.height = 'auto'
+      el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    })
+  }, [handleSend, resetRuntimeThreadState])
 
   const handleCancel = useCallback(() => {
     if (realThreadIdRef.current) {
@@ -1242,7 +1629,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      handleSend()
+      void handleSend()
     }
   }, [handleSend, resetRuntimeThreadState])
 

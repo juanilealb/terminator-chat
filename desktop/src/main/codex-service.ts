@@ -292,7 +292,7 @@ function serializeEvent(event: any): Record<string, unknown> {
     case 'error':
       return { type: 'error', message: event.message }
     default:
-      return { type: 'unknown' }
+      return ensureRecord(event, { type: 'unknown' })
   }
 }
 
@@ -353,6 +353,23 @@ function serializeItem(item: any): Record<string, unknown> {
     case 'error':
       return { type: 'error', id: item.id, message: item.message }
     default:
-      return { type: item.type, id: (item as { id: string }).id }
+      return ensureRecord(item, {
+        type: typeof item?.type === 'string' ? item.type : 'unknown',
+        id: typeof item?.id === 'string' ? item.id : '',
+      })
   }
+}
+
+function ensureRecord(value: unknown, fallback: Record<string, unknown>): Record<string, unknown> {
+  if (value && typeof value === 'object') {
+    try {
+      const parsed = JSON.parse(JSON.stringify(value))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+    } catch {
+      // Fall through to fallback
+    }
+  }
+  return fallback
 }
