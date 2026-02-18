@@ -108,6 +108,8 @@ const PLAN_COMPLETION_QUESTION: ParsedInteractiveQuestion = {
 const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
 const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
+const TOOL_TIMELINE_PREVIEW_LIMIT = 10
+const AUTO_SCROLL_THRESHOLD_PX = 72
 const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
 const INTERRUPT_THREAD_EVENT = 'chat:interrupt-thread'
 
@@ -304,24 +306,10 @@ function pickTrimmedText(payload: Record<string, unknown>, ...keys: string[]): s
   return null
 }
 
-function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
-  const lines: string[] = []
-  if (question.header) lines.push(question.header)
-  lines.push(question.prompt)
-  lines.push('')
-  for (const option of question.options) {
-    lines.push(option.detail
-      ? `${option.index}. ${option.label} - ${option.detail}`
-      : `${option.index}. ${option.label}`)
-  }
-  if (question.footer) {
-    lines.push('')
-    lines.push(question.footer)
-  }
-  return lines.join('\n')
-}
+function parseQuestionDescriptor(value: unknown): ParsedInteractiveQuestion | null {
+  const payload = toRecord(value)
+  if (!payload) return null
 
-function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
   const prompt = pickTrimmedText(payload, 'question', 'prompt', 'text')
   if (!prompt) return null
 
@@ -340,18 +328,15 @@ function parseInteractiveQuestionPayload(payload: Record<string, unknown>): Pars
       options.push({ id: `opt-${i + 1}-${label}`, index: i + 1, label })
       continue
     }
-    if (!option || typeof option !== 'object') continue
-    const entry = option as Record<string, unknown>
+    const entry = toRecord(option)
+    if (!entry) continue
     const label = pickTrimmedText(entry, 'label', 'value', 'name')
     if (!label) continue
-    const detail = pickTrimmedText(entry, 'description', 'detail')
-    const id = pickTrimmedText(entry, 'id')
-      ?? `opt-${i + 1}-${label}`
     options.push({
-      id,
+      id: pickTrimmedText(entry, 'id') ?? `opt-${i + 1}-${label}`,
       index: i + 1,
       label,
-      detail: detail ?? undefined,
+      detail: pickTrimmedText(entry, 'description', 'detail') ?? undefined,
     })
   }
 
@@ -365,12 +350,46 @@ function parseInteractiveQuestionPayload(payload: Record<string, unknown>): Pars
   }
 }
 
+function parseQuestionArray(value: unknown): ParsedInteractiveQuestion | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+
+  for (const question of value) {
+    const parsed = parseQuestionDescriptor(question)
+    if (parsed) return parsed
+  }
+
+  return null
+}
+
+function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
+  const lines: string[] = []
+  if (question.header) lines.push(question.header)
+  lines.push(question.prompt)
+  lines.push('')
+  for (const option of question.options) {
+    lines.push(option.detail
+      ? `${option.index}. ${option.label} - ${option.detail}`
+      : `${option.index}. ${option.label}`)
+  }
+  if (question.footer) {
+    lines.push('')
+    lines.push(question.footer)
+  }
+  return lines.join('\n')
+}
+
+function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
+  return parseQuestionDescriptor(payload) ?? parseQuestionArray(payload.questions)
+}
+
 function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | undefined): ParsedInteractiveQuestion | null {
   if (!metadata) return null
   const raw = metadata.interactiveQuestion
   if (!raw || typeof raw !== 'object') return null
 
   const payload = raw as Record<string, unknown>
+  const fallback = parseInteractiveQuestionPayload(payload)
+  if (fallback) return fallback
   const prompt = pickTrimmedText(payload, 'prompt')
   const optionsRaw = payload.options
   if (!prompt || !Array.isArray(optionsRaw) || optionsRaw.length === 0) return null
@@ -414,6 +433,61 @@ function isThreadItemData(data: ChatEventData): data is ChatThreadItemData {
 function toRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
+}
+
+function extractInteractiveQuestionFromValue(
+  value: unknown,
+  depth = 0,
+  visited = new Set<unknown>(),
+): ParsedInteractiveQuestion | null {
+  if (depth > 5 || value == null) return null
+  if (visited.has(value)) return null
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const parsed = extractInteractiveQuestionFromValue(entry, depth + 1, visited)
+      if (parsed) return parsed
+    }
+    return null
+  }
+
+  const payload = toRecord(value)
+  if (!payload) return null
+
+  visited.add(value)
+
+  const direct = parseInteractiveQuestionPayload(payload)
+  if (direct) return direct
+
+  const nestedKeys = [
+    'raw',
+    'payload',
+    'data',
+    'item',
+    'arguments',
+    'args',
+    'input',
+    'structured_content',
+    'result',
+    'content',
+    'tool_input',
+    'tool_args',
+    'meta',
+    'metadata',
+  ]
+
+  for (const key of nestedKeys) {
+    if (!(key in payload)) continue
+    const parsed = extractInteractiveQuestionFromValue(payload[key], depth + 1, visited)
+    if (parsed) return parsed
+  }
+
+  for (const nested of Object.values(payload)) {
+    const parsed = extractInteractiveQuestionFromValue(nested, depth + 1, visited)
+    if (parsed) return parsed
+  }
+
+  return null
 }
 
 function looksInteractiveQuestionText(content: string): boolean {
@@ -858,6 +932,215 @@ function DetailSection({ label, value }: { label: string; value: unknown }) {
   )
 }
 
+function stripMatchingQuotes(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length < 2) return trimmed
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith('\'') && trimmed.endsWith('\''))) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
+function summarizeCommandForDisplay(command: string): string {
+  const trimmed = command.trim()
+  if (!trimmed) return 'Command'
+
+  const wrappers: RegExp[] = [
+    /^(?:"[^"]*\\)?powershell(?:\.exe)?"?\s+-Command\s+/i,
+    /^(?:"[^"]*\\)?pwsh(?:\.exe)?"?\s+-Command\s+/i,
+    /^(?:"[^"]*\\)?cmd(?:\.exe)?"?\s+\/c\s+/i,
+    /^(?:\/bin\/(?:bash|zsh|sh)|bash|zsh|sh)\s+-lc\s+/i,
+  ]
+
+  let normalized = trimmed
+  for (const pattern of wrappers) {
+    if (pattern.test(normalized)) {
+      normalized = normalized.replace(pattern, '').trim()
+      break
+    }
+  }
+
+  normalized = stripMatchingQuotes(normalized)
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, '\'')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!normalized) normalized = trimmed
+  if (normalized.length > 180) {
+    return `${normalized.slice(0, 177)}...`
+  }
+  return normalized
+}
+
+interface ToolTimelineEntry {
+  id: string
+  type: 'command' | 'tool'
+  title: string
+  subtitle?: string
+  timestamp: number
+  status: unknown
+  exitCode?: number
+  output?: string
+  details: Array<{ label: string; value: unknown }>
+}
+
+function isToolTimelineMessage(message: ChatMessage): boolean {
+  return message.type === 'command' || message.type === 'tool-call'
+}
+
+function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
+  if (message.type === 'command') {
+    const fullCommand = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
+    const shortCommand = summarizeCommandForDisplay(fullCommand)
+    const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
+    const details: Array<{ label: string; value: unknown }> = []
+    if (shortCommand !== fullCommand) {
+      details.push({ label: 'Full command', value: fullCommand })
+    }
+
+    return {
+      id: message.id,
+      type: 'command',
+      title: shortCommand,
+      timestamp: message.timestamp,
+      status: message.metadata?.status,
+      exitCode: typeof message.metadata?.exit_code === 'number' ? message.metadata.exit_code : undefined,
+      output,
+      details,
+    }
+  }
+
+  if (message.type === 'tool-call') {
+    const toolName = (message.metadata?.tool_name as string | undefined)?.trim() || 'tool-call'
+    const server = (message.metadata?.server as string | undefined)?.trim()
+    const tool = (message.metadata?.tool as string | undefined)?.trim()
+    const query = (message.metadata?.query as string | undefined)?.trim()
+    const itemCount = typeof message.metadata?.item_count === 'number' ? message.metadata.item_count : undefined
+    const completedCount = typeof message.metadata?.completed_count === 'number' ? message.metadata.completed_count : undefined
+
+    const title = server && tool ? `${server}.${tool}` : toolName
+    const subtitle = query
+      ? `Query: ${query}`
+      : typeof itemCount === 'number'
+        ? `Tasks: ${completedCount ?? 0}/${itemCount}`
+        : undefined
+
+    const details: Array<{ label: string; value: unknown }> = [
+      { label: 'Arguments', value: message.metadata?.arguments },
+      { label: 'Result', value: message.metadata?.result },
+      { label: 'Items', value: message.metadata?.items },
+      { label: 'Error', value: message.metadata?.error },
+      { label: 'Raw payload', value: message.metadata?.raw },
+    ]
+
+    return {
+      id: message.id,
+      type: 'tool',
+      title,
+      subtitle,
+      timestamp: message.timestamp,
+      status: message.metadata?.status,
+      details,
+    }
+  }
+
+  return null
+}
+
+function formatToolTimelineDotClassName(status: unknown): string {
+  if (status === 'completed') return styles.toolTimelineDotSuccess
+  if (status === 'failed') return styles.toolTimelineDotFail
+  return styles.toolTimelineDotRunning
+}
+
+function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const entries = useMemo(
+    () => messages
+      .map((message) => toToolTimelineEntry(message))
+      .filter((entry): entry is ToolTimelineEntry => entry !== null),
+    [messages],
+  )
+
+  if (entries.length === 0) return null
+
+  const hiddenCount = showAll || entries.length <= TOOL_TIMELINE_PREVIEW_LIMIT
+    ? 0
+    : entries.length - TOOL_TIMELINE_PREVIEW_LIMIT
+  const visibleEntries = hiddenCount > 0
+    ? entries.slice(-TOOL_TIMELINE_PREVIEW_LIMIT)
+    : entries
+  const lastTimestamp = visibleEntries[visibleEntries.length - 1]?.timestamp ?? Date.now()
+
+  return (
+    <div className={`${styles.message} ${styles.messageAssistant}`}>
+      <div className={styles.toolTimelineCard}>
+        <div className={styles.toolTimelineHeader}>
+          <span className={styles.commandLabel}>Tool calls</span>
+          <span className={styles.toolTimelineCount}>{entries.length}</span>
+        </div>
+
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className={styles.toolTimelineToggle}
+            onClick={() => setShowAll(true)}
+          >
+            Show {hiddenCount} earlier
+          </button>
+        )}
+
+        <div className={styles.toolTimelineList}>
+          {visibleEntries.map((entry) => (
+            <details key={entry.id} className={styles.toolTimelineItem}>
+              <summary className={styles.toolTimelineItemSummary}>
+                <span className={`${styles.toolTimelineDot} ${formatToolTimelineDotClassName(entry.status)}`} />
+                <span className={styles.toolTimelineType}>{entry.type}</span>
+                <span className={styles.toolTimelineTitle}>{entry.title}</span>
+                <span className={`${styles.exitCode} ${formatStatusClassName(entry.status)}`}>
+                  {formatStatusLabel(entry.status)}
+                </span>
+                {typeof entry.exitCode === 'number' && (
+                  <span className={`${styles.exitCode} ${entry.exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
+                    exit {entry.exitCode}
+                  </span>
+                )}
+              </summary>
+
+              {entry.subtitle && <div className={styles.toolTimelineSubtitle}>{entry.subtitle}</div>}
+              {entry.output?.trim() && (
+                <details className={styles.toolDetailBlock}>
+                  <summary className={styles.toolDetailSummary}>Output</summary>
+                  <pre className={styles.commandOutput}>{entry.output}</pre>
+                </details>
+              )}
+              {entry.details.map((detail) => (
+                <DetailSection key={`${entry.id}:${detail.label}`} label={detail.label} value={detail.value} />
+              ))}
+            </details>
+          ))}
+        </div>
+
+        {showAll && entries.length > TOOL_TIMELINE_PREVIEW_LIMIT && (
+          <button
+            type="button"
+            className={styles.toolTimelineToggle}
+            onClick={() => setShowAll(false)}
+          >
+            Show latest {TOOL_TIMELINE_PREVIEW_LIMIT}
+          </button>
+        )}
+      </div>
+      <div className={styles.messageTime}>{formatMessageTime(lastTimestamp)}</div>
+    </div>
+  )
+}
+
+type ChatRenderBlock =
+  | { kind: 'message'; message: ChatMessage }
+  | { kind: 'tool-group'; messages: ChatMessage[] }
+
 function CommandCard({ message }: { message: ChatMessage }) {
   const command = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
   const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
@@ -898,17 +1181,18 @@ function FileChangeCard({ message }: { message: ChatMessage }) {
           <div className={styles.fileChangeList}>
             {changes.map((change) => (
               <div key={`${change.kind}:${change.path}`} className={styles.fileChangeItem}>
-                <span className={`${styles.fileChangeKind} ${
-                  change.kind === 'add'
-                    ? styles.fileChangeAdd
-                    : change.kind === 'delete'
-                      ? styles.fileChangeDelete
-                      : styles.fileChangeUpdate
-                }`}
+                <span
+                  className={`${styles.fileChangeSign} ${
+                    change.kind === 'add'
+                      ? styles.fileChangeAdd
+                      : change.kind === 'delete'
+                        ? styles.fileChangeDelete
+                        : styles.fileChangeUpdate
+                  }`}
                 >
-                  {change.kind}
+                  {change.kind === 'add' ? '+' : change.kind === 'delete' ? '-' : '~'}
                 </span>
-                <span>{change.path}</span>
+                <span className={styles.fileChangePath}>{change.path}</span>
               </div>
             ))}
           </div>
@@ -1113,7 +1397,9 @@ function MessageBubble({
   return (
     <div className={`${styles.message} ${roleClass}`}>
       {isUser ? (
-        <div className={`${styles.bubble} ${styles.bubbleUser}`}>{message.content}</div>
+        <div className={`${styles.bubble} ${styles.bubbleUser}`}>
+          <div className={`${styles.assistantText} ${styles.userText}`}>{renderAssistantMarkdown(message.content)}</div>
+        </div>
       ) : (
         <div className={styles.assistantText}>{renderAssistantMarkdown(message.content)}</div>
       )}
@@ -1172,6 +1458,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [resolvingBranchConflict, setResolvingBranchConflict] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
   const [isDragging, setIsDragging] = useState(false)
+  const [autoFollowMessages, setAutoFollowMessages] = useState(true)
+  const [hasUnseenMessages, setHasUnseenMessages] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1183,6 +1471,42 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const activeTurnHasItemsRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
   const branchLockKeyRef = useRef<string | null>(null)
+  const hasInitializedMessageScrollRef = useRef(false)
+  const lastMessageVersionRef = useRef('')
+
+  const messageBlocks = useMemo<ChatRenderBlock[]>(() => {
+    const blocks: ChatRenderBlock[] = []
+    let timelineBatch: ChatMessage[] = []
+
+    const flushTimelineBatch = () => {
+      if (timelineBatch.length === 0) return
+      blocks.push({ kind: 'tool-group', messages: timelineBatch })
+      timelineBatch = []
+    }
+
+    for (const message of messages) {
+      if (isToolTimelineMessage(message)) {
+        timelineBatch.push(message)
+        continue
+      }
+
+      flushTimelineBatch()
+      blocks.push({ kind: 'message', message })
+    }
+
+    flushTimelineBatch()
+    return blocks
+  }, [messages])
+
+  const messageUpdateVersion = useMemo(() => {
+    const lastMessage = messages[messages.length - 1]
+    return [
+      messages.length,
+      lastMessage?.id ?? '',
+      lastMessage?.timestamp ?? 0,
+      loading ? 1 : 0,
+    ].join(':')
+  }, [messages, loading])
 
   useEffect(() => {
     const appendPrompt = (prompt: string) => {
@@ -1573,16 +1897,65 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`
   }, [input])
 
-  // Auto-scroll to bottom on new content and while loading.
+  const isNearBottom = useCallback((container: HTMLDivElement): boolean => {
+    const distanceToBottom = container.scrollHeight - (container.scrollTop + container.clientHeight)
+    return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX
+  }, [])
+
+  const scrollToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    container.scrollTo({ top: container.scrollHeight, behavior })
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' })
+    setAutoFollowMessages(true)
+    setHasUnseenMessages(false)
+  }, [])
+
   useEffect(() => {
-    const el = messagesContainerRef.current
-    if (!el) return
-    const raf = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    hasInitializedMessageScrollRef.current = false
+    lastMessageVersionRef.current = ''
+    setAutoFollowMessages(true)
+    setHasUnseenMessages(false)
+  }, [threadId])
+
+  // Auto-follow only while user is near the bottom. If user scrolls up, keep
+  // the viewport stable and show a "jump to latest" affordance.
+  useEffect(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const hasVersionChanged = lastMessageVersionRef.current !== messageUpdateVersion
+    lastMessageVersionRef.current = messageUpdateVersion
+
+    if (!hasInitializedMessageScrollRef.current) {
+      hasInitializedMessageScrollRef.current = true
+      scrollToLatest('auto')
+      return
+    }
+    if (!hasVersionChanged) return
+
+    if (autoFollowMessages || isNearBottom(container)) {
+      scrollToLatest('auto')
+      return
+    }
+
+    setHasUnseenMessages(true)
+  }, [messageUpdateVersion, autoFollowMessages, isNearBottom, scrollToLatest])
+
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const nearBottom = isNearBottom(container)
+    setAutoFollowMessages((current) => (current === nearBottom ? current : nearBottom))
+    if (nearBottom) {
+      setHasUnseenMessages(false)
+    }
+  }, [isNearBottom])
+
+  const handleJumpToLatest = useCallback(() => {
+    requestAnimationFrame(() => {
+      scrollToLatest('smooth')
     })
-    return () => cancelAnimationFrame(raf)
-  }, [messages, loading])
+  }, [scrollToLatest])
 
   useEffect(() => {
     let cancelled = false
@@ -1794,7 +2167,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         } else if (typedData.type === 'unknown_item') {
           const raw = toRecord(typedData.raw)
           if (raw) {
-            const interactiveQuestion = parseInteractiveQuestionPayload(raw)
+            const interactiveQuestion = extractInteractiveQuestionFromValue(raw)
             if (interactiveQuestion) {
               setLoading(false)
               updateThreadStatusAndLock('waiting')
@@ -1865,7 +2238,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           : toRecord(typedData)
 
         const interactiveQuestion = topLevelPayload
-          ? parseInteractiveQuestionPayload(topLevelPayload)
+          ? extractInteractiveQuestionFromValue(topLevelPayload)
           : null
         if (interactiveQuestion) {
           setLoading(false)
@@ -2433,15 +2806,31 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           </div>
         </div>
       ) : (
-        <div className={styles.messages} ref={messagesContainerRef}>
-          {messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              onQuestionOptionSelect={handleQuestionOptionSelect}
-            />
+        <div className={styles.messages} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+          {messageBlocks.map((block) => (
+            block.kind === 'tool-group' ? (
+              <ToolTimelineGroup
+                key={`tool-group:${block.messages[0]!.id}:${block.messages[block.messages.length - 1]!.id}`}
+                messages={block.messages}
+              />
+            ) : (
+              <MessageBubble
+                key={block.message.id}
+                message={block.message}
+                onQuestionOptionSelect={handleQuestionOptionSelect}
+              />
+            )
           ))}
           {loading && <LoadingIndicator />}
+          {hasUnseenMessages && (
+            <button
+              type="button"
+              className={styles.jumpToLatestButton}
+              onClick={handleJumpToLatest}
+            >
+              Jump to latest
+            </button>
+          )}
           <div ref={messagesEndRef} />
         </div>
       )}

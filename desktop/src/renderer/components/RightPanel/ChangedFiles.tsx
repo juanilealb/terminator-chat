@@ -251,6 +251,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
 
   const staged = files.filter((f) => f.staged)
   const unstaged = files.filter((f) => !f.staged)
+  const hasChanges = files.length > 0
 
   const runGitOp = useCallback(async (op: () => Promise<void>) => {
     setBusy(true)
@@ -402,6 +403,47 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     addToast,
   ])
 
+  const resolveSelectedPrBaseBranch = useCallback(() => {
+    const base = normalizeBranchName(selectedBaseBranch || '')
+    return base || undefined
+  }, [selectedBaseBranch])
+
+  const handlePushBranch = useCallback(() => {
+    void runGitOp(async () => {
+      const pushed = await window.api.git.pushCurrentBranch(worktreePath)
+      addToast({
+        id: crypto.randomUUID(),
+        message: `Pushed ${pushed.branch}.`,
+        type: 'info',
+      })
+    })
+  }, [worktreePath, runGitOp, addToast])
+
+  const handleOpenOrCreatePr = useCallback((pushFirst: boolean) => {
+    void runGitOp(async () => {
+      let pushedBranch: string | null = null
+      if (pushFirst) {
+        const pushed = await window.api.git.pushCurrentBranch(worktreePath)
+        pushedBranch = pushed.branch
+      }
+
+      const baseBranch = resolveSelectedPrBaseBranch()
+      const pr = await window.api.git.openOrCreatePr(worktreePath, baseBranch)
+      addToast({
+        id: crypto.randomUUID(),
+        message: pushFirst
+          ? pr.created
+            ? `Pushed ${pushedBranch ?? pr.branch} and created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
+            : `Pushed ${pushedBranch ?? pr.branch} and opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`
+          : pr.created
+            ? `Created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
+            : `Opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
+        type: 'info',
+      })
+      window.open(pr.url)
+    })
+  }, [worktreePath, runGitOp, addToast, resolveSelectedPrBaseBranch])
+
   const handleCommitFlowSelect = useCallback((flow: CommitFlowAction) => {
     setCommitFlow(flow)
   }, [])
@@ -421,15 +463,6 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     )
   }
 
-  if (files.length === 0) {
-    return (
-      <div className={styles.emptyState}>
-        <CheckmarkCircleRegular className={styles.emptyIcon} />
-        <span className={styles.emptyText}>No changes</span>
-      </div>
-    )
-  }
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault()
@@ -445,164 +478,227 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     !!commitMsg.trim() &&
     (staged.length > 0 || unstaged.length > 0) &&
     (!needsTargetBranch || !!selectedBaseBranch)
+  const branchDisplayName = normalizeBranchName(workspace?.branch ?? '') || 'detached'
 
   return (
     <div className={styles.changedFilesList}>
-      {/* Commit input */}
-      <div className={styles.commitArea}>
-        <Textarea
-          className={styles.commitInput}
-          placeholder="Commit message"
-          value={commitMsg}
-          onChange={(_e, data) => setCommitMsg(data.value)}
-          onKeyDown={handleKeyDown}
-          resize="vertical"
-          size="small"
-          appearance="outline"
-        />
-        <div className={styles.commitActions}>
-          <Tooltip
-            label={commitFlowOption.tooltip}
-            shortcut={formatShortcut(
-              SHORTCUT_MAP.commitStagedChanges.mac,
-              SHORTCUT_MAP.commitStagedChanges.win
-            )}
-          >
-            <Button
-              className={styles.commitButton}
-              disabled={!canCommit}
-              onClick={handleCommitFlow}
-              size="small"
-            >
-              {commitFlowOption.label}
-            </Button>
-          </Tooltip>
-          <Menu>
-            <MenuTrigger disableButtonEnhancement>
-              <Button
-                className={styles.commitMenuToggle}
-                aria-label="Commit flow options"
-                disabled={busy}
-                size="small"
-                icon={<ChevronDownRegular />}
-              />
-            </MenuTrigger>
-            <MenuPopover>
-              <MenuList>
-                {COMMIT_FLOW_OPTIONS.map((option) => (
-                  <MenuItem
-                    key={option.id}
-                    onClick={() => handleCommitFlowSelect(option.id)}
-                  >
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </MenuList>
-            </MenuPopover>
-          </Menu>
+      <div className={styles.branchActionsCard}>
+        <div className={styles.sectionHeader}>
+          <span className={styles.sectionLabel}>Branch actions</span>
+          <span className={styles.branchBadge}>{branchDisplayName}</span>
         </div>
-        {needsTargetBranch && (
-          <div className={styles.flowDetailRow}>
-            <span className={styles.flowDetailLabel}>PR base</span>
-            <select
-              className={styles.flowSelect}
-              value={selectedBaseBranch}
-              onChange={(event) => setSelectedBaseBranch(normalizeBranchName(event.target.value))}
-              disabled={busy || !canSelectTargetBranch}
-            >
-              {canSelectTargetBranch ? (
-                availableBaseBranches.map((branch) => (
-                  <option key={branch} value={branch}>
-                    {branch}
-                  </option>
-                ))
-              ) : (
-                <option value="">No origin branches available</option>
-              )}
-            </select>
-          </div>
-        )}
+        <div className={styles.flowDetailRow}>
+          <span className={styles.flowDetailLabel}>PR base</span>
+          <select
+            className={styles.flowSelect}
+            value={selectedBaseBranch}
+            onChange={(event) => setSelectedBaseBranch(normalizeBranchName(event.target.value))}
+            disabled={busy}
+          >
+            <option value="">Repository default</option>
+            {availableBaseBranches.map((branch) => (
+              <option key={branch} value={branch}>
+                {branch}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className={styles.branchActionsRow}>
+          <Button
+            appearance="secondary"
+            size="small"
+            disabled={busy}
+            onClick={handlePushBranch}
+          >
+            Push branch
+          </Button>
+          <Button
+            appearance="secondary"
+            size="small"
+            disabled={busy}
+            onClick={() => handleOpenOrCreatePr(false)}
+          >
+            Open PR
+          </Button>
+          <Button
+            appearance="primary"
+            size="small"
+            disabled={busy}
+            onClick={() => handleOpenOrCreatePr(true)}
+          >
+            Push and open PR
+          </Button>
+        </div>
       </div>
 
-      {/* Staged section */}
-      {staged.length > 0 && (
-        <div className={styles.changeSection}>
-          <div className={styles.sectionHeader}>
-            <span className={styles.sectionLabel}>Staged Changes</span>
-            <span className={styles.sectionCount}>{staged.length}</span>
-            <span className={styles.sectionActions}>
-              <Tooltip label="Unstage All">
+      {/* Commit input */}
+      {hasChanges && (
+        <div className={styles.commitArea}>
+          <Textarea
+            className={styles.commitInput}
+            placeholder="Commit message"
+            value={commitMsg}
+            onChange={(_e, data) => setCommitMsg(data.value)}
+            onKeyDown={handleKeyDown}
+            resize="vertical"
+            size="small"
+            appearance="outline"
+          />
+          <div className={styles.commitActions}>
+            <Tooltip
+              label={commitFlowOption.tooltip}
+              shortcut={formatShortcut(
+                SHORTCUT_MAP.commitStagedChanges.mac,
+                SHORTCUT_MAP.commitStagedChanges.win
+              )}
+            >
+              <Button
+                className={styles.commitButton}
+                disabled={!canCommit}
+                onClick={handleCommitFlow}
+                size="small"
+              >
+                {commitFlowOption.label}
+              </Button>
+            </Tooltip>
+            <Menu>
+              <MenuTrigger disableButtonEnhancement>
                 <Button
-                  aria-label="Unstage all files"
-                  appearance="subtle"
-                  size="small"
+                  className={styles.commitMenuToggle}
+                  aria-label="Commit flow options"
                   disabled={busy}
-                  onClick={() => unstageFiles(staged.map((f) => f.path))}
-                  icon={<SubtractRegular />}
+                  size="small"
+                  icon={<ChevronDownRegular />}
                 />
-              </Tooltip>
-            </span>
+              </MenuTrigger>
+              <MenuPopover>
+                <MenuList>
+                  {COMMIT_FLOW_OPTIONS.map((option) => (
+                    <MenuItem
+                      key={option.id}
+                      onClick={() => handleCommitFlowSelect(option.id)}
+                    >
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </MenuList>
+              </MenuPopover>
+            </Menu>
           </div>
-          {staged.map((file) => (
-            <FileRow
-              key={`staged-${file.path}`}
-              file={file}
-              busy={busy}
-              onAction={() => unstageFiles([file.path])}
-              actionIcon={<SubtractRegular />}
-              actionTitle="Unstage"
-              onOpenDiff={openDiff}
-            />
-          ))}
+          {needsTargetBranch && (
+            <div className={styles.flowDetailRow}>
+              <span className={styles.flowDetailLabel}>PR base</span>
+              <select
+                className={styles.flowSelect}
+                value={selectedBaseBranch}
+                onChange={(event) => setSelectedBaseBranch(normalizeBranchName(event.target.value))}
+                disabled={busy || !canSelectTargetBranch}
+              >
+                {canSelectTargetBranch ? (
+                  availableBaseBranches.map((branch) => (
+                    <option key={branch} value={branch}>
+                      {branch}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No origin branches available</option>
+                )}
+              </select>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Unstaged section */}
-      {unstaged.length > 0 && (
-        <div className={styles.changeSection}>
-          <div className={styles.sectionHeader}>
-            <span className={styles.sectionLabel}>Changes</span>
-            <span className={styles.sectionCount}>{unstaged.length}</span>
-            <span className={styles.sectionActions}>
-              <Tooltip label="Discard All">
-                <Button
-                  aria-label="Discard all unstaged changes"
-                  appearance="subtle"
-                  size="small"
-                  disabled={busy}
-                  onClick={() => {
-                    const tracked = unstaged.filter((f) => f.status !== 'untracked').map((f) => f.path)
-                    const untracked = unstaged.filter((f) => f.status === 'untracked').map((f) => f.path)
-                    runGitOp(() => window.api.git.discard(worktreePath, tracked, untracked))
-                  }}
-                  icon={<ArrowUndoRegular />}
-                />
-              </Tooltip>
-              <Tooltip label="Stage All">
-                <Button
-                  aria-label="Stage all files"
-                  appearance="subtle"
-                  size="small"
-                  disabled={busy}
-                  onClick={() => stageFiles(unstaged.map((f) => f.path))}
-                  icon={<AddRegular />}
-                />
-              </Tooltip>
-            </span>
-          </div>
-          {unstaged.map((file) => (
-            <FileRow
-              key={`unstaged-${file.path}`}
-              file={file}
-              busy={busy}
-              onAction={() => stageFiles([file.path])}
-              actionIcon={<AddRegular />}
-              actionTitle="Stage"
-              onDiscard={() => discardFiles(file)}
-              onOpenDiff={openDiff}
-            />
-          ))}
+      {!hasChanges && (
+        <div className={styles.noChangesBanner}>
+          <CheckmarkCircleRegular className={styles.emptyIcon} />
+          <span className={styles.emptyText}>No local changes</span>
         </div>
+      )}
+
+      {hasChanges && (
+        <>
+          {/* Staged section */}
+          {staged.length > 0 && (
+            <div className={styles.changeSection}>
+              <div className={styles.sectionHeader}>
+                <span className={styles.sectionLabel}>Staged Changes</span>
+                <span className={styles.sectionCount}>{staged.length}</span>
+                <span className={styles.sectionActions}>
+                  <Tooltip label="Unstage All">
+                    <Button
+                      aria-label="Unstage all files"
+                      appearance="subtle"
+                      size="small"
+                      disabled={busy}
+                      onClick={() => unstageFiles(staged.map((f) => f.path))}
+                      icon={<SubtractRegular />}
+                    />
+                  </Tooltip>
+                </span>
+              </div>
+              {staged.map((file) => (
+                <FileRow
+                  key={`staged-${file.path}`}
+                  file={file}
+                  busy={busy}
+                  onAction={() => unstageFiles([file.path])}
+                  actionIcon={<SubtractRegular />}
+                  actionTitle="Unstage"
+                  onOpenDiff={openDiff}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* Unstaged section */}
+          {unstaged.length > 0 && (
+            <div className={styles.changeSection}>
+              <div className={styles.sectionHeader}>
+                <span className={styles.sectionLabel}>Changes</span>
+                <span className={styles.sectionCount}>{unstaged.length}</span>
+                <span className={styles.sectionActions}>
+                  <Tooltip label="Discard All">
+                    <Button
+                      aria-label="Discard all unstaged changes"
+                      appearance="subtle"
+                      size="small"
+                      disabled={busy}
+                      onClick={() => {
+                        const tracked = unstaged.filter((f) => f.status !== 'untracked').map((f) => f.path)
+                        const untracked = unstaged.filter((f) => f.status === 'untracked').map((f) => f.path)
+                        runGitOp(() => window.api.git.discard(worktreePath, tracked, untracked))
+                      }}
+                      icon={<ArrowUndoRegular />}
+                    />
+                  </Tooltip>
+                  <Tooltip label="Stage All">
+                    <Button
+                      aria-label="Stage all files"
+                      appearance="subtle"
+                      size="small"
+                      disabled={busy}
+                      onClick={() => stageFiles(unstaged.map((f) => f.path))}
+                      icon={<AddRegular />}
+                    />
+                  </Tooltip>
+                </span>
+              </div>
+              {unstaged.map((file) => (
+                <FileRow
+                  key={`unstaged-${file.path}`}
+                  file={file}
+                  busy={busy}
+                  onAction={() => stageFiles([file.path])}
+                  actionIcon={<AddRegular />}
+                  actionTitle="Stage"
+                  onDiscard={() => discardFiles(file)}
+                  onOpenDiff={openDiff}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
