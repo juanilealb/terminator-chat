@@ -110,6 +110,7 @@ const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
 const TOOL_TIMELINE_PREVIEW_LIMIT = 10
 const AUTO_SCROLL_THRESHOLD_PX = 72
+const MAX_QUEUED_PROMPTS = 20
 const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
 const INTERRUPT_THREAD_EVENT = 'chat:interrupt-thread'
 
@@ -142,12 +143,21 @@ interface PendingSendPayload {
   images: AttachedImage[]
 }
 
+interface QueuedPromptPayload {
+  id: string
+  text: string
+  mode: SessionMode
+  images: AttachedImage[]
+  createdAt: number
+}
+
 interface InterruptThreadEventDetail {
   threadId: string
   reason?: string
 }
 
 const branchExecutionLocksByKey = new Map<string, BranchExecutionLock>()
+const queuedPromptsByThread = new Map<string, QueuedPromptPayload[]>()
 
 function toBranchLockKey(projectId: string, branch: string): string {
   return `${projectId}:${normalizeBranchName(branch).toLowerCase()}`
@@ -718,6 +728,15 @@ interface AttachedImage {
   path: string
   name: string
   previewUrl: string
+}
+
+function queuePreviewText(payload: QueuedPromptPayload): string {
+  const text = payload.text.trim()
+  if (text.length > 0) return text.replace(/\s+/g, ' ')
+  if (payload.images.length > 0) {
+    return `[${payload.images.length} image${payload.images.length === 1 ? '' : 's'}]`
+  }
+  return '[empty]'
 }
 
 function formatMessageTime(timestamp: number): string {
@@ -1457,6 +1476,11 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [pendingSendPayload, setPendingSendPayload] = useState<PendingSendPayload | null>(null)
   const [resolvingBranchConflict, setResolvingBranchConflict] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPromptPayload[]>(
+    () => queuedPromptsByThread.get(threadId) ?? [],
+  )
+  const [waitingForInput, setWaitingForInput] = useState(false)
+  const [cancelInFlight, setCancelInFlight] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [autoFollowMessages, setAutoFollowMessages] = useState(true)
   const [hasUnseenMessages, setHasUnseenMessages] = useState(false)
@@ -1507,6 +1531,29 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       loading ? 1 : 0,
     ].join(':')
   }, [messages, loading])
+
+  const nextQueuedPrompt = queuedPrompts[0] ?? null
+  const queuePreview = nextQueuedPrompt ? queuePreviewText(nextQueuedPrompt) : ''
+  const queuedCount = queuedPrompts.length
+  const additionalQueuedCount = Math.max(queuedCount - 1, 0)
+  const queueBarVisible = loading || waitingForInput || queuedCount > 0
+  const queueStatusLabel = waitingForInput
+    ? 'Waiting for input'
+    : (loading || cancelInFlight)
+      ? 'Agent running'
+      : 'Queue ready'
+
+  useEffect(() => {
+    setQueuedPrompts(queuedPromptsByThread.get(threadId) ?? [])
+  }, [threadId])
+
+  useEffect(() => {
+    if (queuedPrompts.length > 0) {
+      queuedPromptsByThread.set(threadId, queuedPrompts)
+      return
+    }
+    queuedPromptsByThread.delete(threadId)
+  }, [threadId, queuedPrompts])
 
   useEffect(() => {
     const appendPrompt = (prompt: string) => {
@@ -2120,12 +2167,16 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         updateThreadStatusAndLock('running')
         return
       }
 
       if (phase === 'turn.waiting_input') {
         setLoading(false)
+        setWaitingForInput(true)
+        setCancelInFlight(false)
         updateThreadStatusAndLock('waiting')
         const waitingMessage = mapChatEventToMessage({
           data: typedData,
@@ -2155,6 +2206,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
           if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
             setLoading(false)
+            setWaitingForInput(true)
             updateThreadStatusAndLock('waiting')
             notifyInactiveChatTab('waiting_input')
           }
@@ -2170,6 +2222,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             const interactiveQuestion = extractInteractiveQuestionFromValue(raw)
             if (interactiveQuestion) {
               setLoading(false)
+              setWaitingForInput(true)
               updateThreadStatusAndLock('waiting')
               notifyInactiveChatTab('waiting_input')
               msg = {
@@ -2189,6 +2242,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('completed')
         const completionMessage = mapChatEventToMessage({
@@ -2206,6 +2261,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         }
       } else if (phase === 'turn.cancelled') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('idle')
         const cancelledMessage = mapChatEventToMessage({
@@ -2219,6 +2276,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         }
       } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('idle')
         const failureMessage = mapChatEventToMessage({
@@ -2242,6 +2301,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           : null
         if (interactiveQuestion) {
           setLoading(false)
+          setWaitingForInput(true)
           updateThreadStatusAndLock('waiting')
           notifyInactiveChatTab('waiting_input')
           appendChatMessage({
@@ -2296,6 +2356,48 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
   }, [setCodexLoggedIn])
 
+  const clearComposerDraft = useCallback(() => {
+    setInput('')
+    setAttachedImages([])
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [])
+
+  const enqueuePrompt = useCallback((payload: Omit<QueuedPromptPayload, 'id' | 'createdAt'>, prioritize = false) => {
+    setQueuedPrompts((prev) => {
+      const nextPayload: QueuedPromptPayload = {
+        id: crypto.randomUUID(),
+        createdAt: Date.now(),
+        ...payload,
+      }
+      const nextQueue = prioritize
+        ? [nextPayload, ...prev]
+        : [...prev, nextPayload]
+
+      if (nextQueue.length <= MAX_QUEUED_PROMPTS) return nextQueue
+      addToast({
+        id: crypto.randomUUID(),
+        message: `Queue is full (${MAX_QUEUED_PROMPTS}). Oldest queued message was dropped.`,
+        type: 'info',
+      })
+      return nextQueue.slice(nextQueue.length - MAX_QUEUED_PROMPTS)
+    })
+  }, [addToast])
+
+  const enqueueCurrentDraft = useCallback((prioritize = false): boolean => {
+    const trimmed = input.trim()
+    if (!trimmed && attachedImages.length === 0) return false
+
+    enqueuePrompt({
+      text: input,
+      mode: sessionMode,
+      images: attachedImages.map((image) => ({ ...image })),
+    }, prioritize)
+    clearComposerDraft()
+    return true
+  }, [input, attachedImages, sessionMode, enqueuePrompt, clearComposerDraft])
+
   const handleSend = useCallback(async (overrides?: {
     text?: string
     mode?: SessionMode
@@ -2305,7 +2407,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     const text = overrides?.text ?? input
     const images = overrides?.images ?? attachedImages
     const trimmed = text.trim()
-    if ((!trimmed && images.length === 0) || !worktreePath) return
+    if ((!trimmed && images.length === 0) || !worktreePath) return false
 
     const effectiveMode = overrides?.mode ?? sessionMode
 
@@ -2322,7 +2424,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         if (statusConflict && !overrides?.forceTakeover) {
           setPendingSendPayload(pendingPayload)
           setBranchConflict(statusConflict)
-          return
+          return false
         }
 
         if (overrides?.forceTakeover) {
@@ -2345,7 +2447,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           if (!lockResult.acquired) {
             setPendingSendPayload(pendingPayload)
             setBranchConflict(enrichBranchConflict(lockResult.conflict))
-            return
+            return false
           }
 
           branchLockKeyRef.current = lockResult.key
@@ -2401,7 +2503,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             }],
           },
         }))
-        return
+        return false
       }
     }
 
@@ -2423,6 +2525,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     setInput('')
     setAttachedImages([])
     setLoading(true)
+    setWaitingForInput(false)
+    setCancelInFlight(false)
     updateThreadStatusAndLock('running')
 
     // Auto-resize textarea
@@ -2450,6 +2554,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       await window.api.chat.send(realThreadIdRef.current!, sendInput)
     } catch (err) {
       setLoading(false)
+      setWaitingForInput(false)
+      setCancelInFlight(false)
       updateThreadStatusAndLock('idle')
       useAppStore.setState((s) => ({
         chatMessages: {
@@ -2464,7 +2570,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           }],
         },
       }))
+      return true
     }
+    return true
   }, [
     input,
     worktreePath,
@@ -2483,6 +2591,79 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     releaseOwnedBranchLock,
     updateThreadStatusAndLock,
   ])
+
+  const handlePrimarySend = useCallback(() => {
+    if (loading || cancelInFlight) {
+      void enqueueCurrentDraft()
+      return
+    }
+    void handleSend()
+  }, [loading, cancelInFlight, enqueueCurrentDraft, handleSend])
+
+  const handleSendQueuedNow = useCallback(() => {
+    if (!nextQueuedPrompt) return
+
+    if (waitingForInput) {
+      addToast({
+        id: crypto.randomUUID(),
+        message: 'Answer the current question first. Queued messages are paused.',
+        type: 'info',
+      })
+      return
+    }
+
+    if (loading || cancelInFlight) {
+      setCancelInFlight(true)
+      if (realThreadIdRef.current) {
+        window.api.chat.cancel(realThreadIdRef.current)
+      } else {
+        setCancelInFlight(false)
+      }
+      setLoading(false)
+      updateThreadStatusAndLock('idle')
+      return
+    }
+
+    void (async () => {
+      const accepted = await handleSend({
+        text: nextQueuedPrompt.text,
+        mode: nextQueuedPrompt.mode,
+        images: nextQueuedPrompt.images,
+      })
+      if (!accepted) return
+      setQueuedPrompts((prev) => prev.filter((entry) => entry.id !== nextQueuedPrompt.id))
+    })()
+  }, [
+    nextQueuedPrompt,
+    waitingForInput,
+    loading,
+    cancelInFlight,
+    addToast,
+    updateThreadStatusAndLock,
+    handleSend,
+  ])
+
+  useEffect(() => {
+    if (loading || waitingForInput || cancelInFlight || queuedPrompts.length === 0) return
+    if (branchConflict || pendingSendPayload) return
+
+    const next = queuedPrompts[0]
+    if (!next) return
+    if (!next.text.trim() && next.images.length === 0) {
+      setQueuedPrompts((prev) => prev.slice(1))
+      return
+    }
+
+    void (async () => {
+      const accepted = await handleSend({
+        text: next.text,
+        mode: next.mode,
+        images: next.images,
+      })
+      if (!accepted) return
+      setQueuedPrompts((prev) => prev.filter((entry) => entry.id !== next.id))
+    })()
+  }, [loading, waitingForInput, cancelInFlight, queuedPrompts, branchConflict, pendingSendPayload, handleSend])
 
   const handleQuestionOptionSelect = useCallback((answer: string, optionId: string) => {
     setLoading(false)
@@ -2519,10 +2700,14 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [handleSend, resetRuntimeThreadState])
 
   const handleCancel = useCallback(() => {
+    setCancelInFlight(true)
     if (realThreadIdRef.current) {
       window.api.chat.cancel(realThreadIdRef.current)
+    } else {
+      setCancelInFlight(false)
     }
     setLoading(false)
+    setWaitingForInput(false)
     updateThreadStatusAndLock('idle')
   }, [updateThreadStatusAndLock])
 
@@ -2536,9 +2721,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSend()
+      handlePrimarySend()
     }
-  }, [handleSend, resetRuntimeThreadState])
+  }, [handlePrimarySend, resetRuntimeThreadState])
 
   const handleTextareaInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
@@ -2841,6 +3026,34 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             Plan mode active
           </div>
         )}
+        {queueBarVisible && (
+          <div className={styles.queueBar}>
+            <div className={styles.queueBarTextBlock}>
+              <span className={styles.queueBarStatus}>{queueStatusLabel}</span>
+              {nextQueuedPrompt ? (
+                <span className={styles.queueBarText}>{queuePreview}</span>
+              ) : (
+                <span className={styles.queueBarHint}>Type a message and press send to queue it</span>
+              )}
+            </div>
+            <div className={styles.queueBarActions}>
+              {additionalQueuedCount > 0 && (
+                <span className={styles.queueBarCount}>+{additionalQueuedCount}</span>
+              )}
+              <button
+                type="button"
+                className={styles.queueBarSendBtn}
+                onClick={handleSendQueuedNow}
+                disabled={!nextQueuedPrompt}
+                title={loading || cancelInFlight ? 'Stop current turn and send next' : 'Send queued message now'}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                  <path d="M2 7h8.1l-2.8-2.8 1.1-1.1L13 7l-4.7 3.9-1.1-1.1L10.1 7H2z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
         <div
           className={`${styles.inputContainer} ${isDragging ? styles.inputContainerDragOver : ''}`}
           onDragOver={handleDragOver}
@@ -2856,7 +3069,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             onPaste={handlePaste}
             placeholder={sessionMode === 'plan' ? 'Ask for a plan... (Shift+Tab to toggle)' : 'Ask the agent...'}
             rows={1}
-            disabled={loading}
+            disabled={cancelInFlight}
           />
 
           {/* Image preview row */}
@@ -2931,19 +3144,31 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
             {/* Send / Stop button */}
             {loading ? (
-              <button
-                className={`${styles.sendBtn} ${styles.sendBtnStop}`}
-                onClick={handleCancel}
-                title="Stop"
-              >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                  <rect x="2" y="2" width="10" height="10" rx="1.5" />
-                </svg>
-              </button>
+              <>
+                <button
+                  className={`${styles.sendBtn} ${styles.sendBtnQueue}`}
+                  onClick={handlePrimarySend}
+                  disabled={!input.trim() && attachedImages.length === 0}
+                  title="Queue message"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                    <path d="M7 1.5v9M3.5 5L7 1.5 10.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                  </svg>
+                </button>
+                <button
+                  className={`${styles.sendBtn} ${styles.sendBtnStop}`}
+                  onClick={handleCancel}
+                  title="Stop"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                    <rect x="2" y="2" width="10" height="10" rx="1.5" />
+                  </svg>
+                </button>
+              </>
             ) : (
               <button
                 className={styles.sendBtn}
-                onClick={handleSend}
+                onClick={handlePrimarySend}
                 disabled={!input.trim() && attachedImages.length === 0}
                 title="Send message"
               >
