@@ -221,6 +221,7 @@ export const IPC = {
   APP_GET_DATA_PATH: 'app:get-data-path',
   APP_SET_UNREAD_COUNT: 'app:set-unread-count',
   APP_SET_ACTIVE_WORKSPACE: 'app:set-active-workspace',
+  APP_SET_PREVENT_SLEEP: 'app:set-prevent-sleep',
   APP_OPEN_DIRECTORY: 'app:open-directory',
   APP_SET_THEME_SOURCE: 'app:set-theme-source',
   APP_WINDOW_MINIMIZE: 'app:window-minimize',

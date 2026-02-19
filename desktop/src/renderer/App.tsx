@@ -304,6 +304,14 @@ export function App() {
   }, [activeWorkspaceId])
 
   useEffect(() => {
+    const shouldPreventSleep = settings.preventSleepWhileRunning && runningAgentCount > 0
+    window.api.app.setPreventSleep(shouldPreventSleep)
+    return () => {
+      window.api.app.setPreventSleep(false)
+    }
+  }, [settings.preventSleepWhileRunning, runningAgentCount])
+
+  useEffect(() => {
     const unsub = window.api.app.onThemeChanged((payload) => {
       setOsTheme(payload)
     })

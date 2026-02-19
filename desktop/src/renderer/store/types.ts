@@ -114,6 +114,7 @@ export interface Settings {
   themePreference: ThemePreference
   confirmOnClose: boolean
   autoSaveOnBlur: boolean
+  preventSleepWhileRunning: boolean
   defaultProjectOwnership: ProjectOwnership
   githubPersonalLogin: string
   githubWorkLogin: string
@@ -127,6 +128,7 @@ export const DEFAULT_SETTINGS: Settings = {
   themePreference: 'system',
   confirmOnClose: true,
   autoSaveOnBlur: false,
+  preventSleepWhileRunning: false,
   defaultProjectOwnership: DEFAULT_PROJECT_OWNERSHIP,
   githubPersonalLogin: '',
   githubWorkLogin: '',

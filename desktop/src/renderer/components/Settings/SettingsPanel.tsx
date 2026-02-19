@@ -479,6 +479,16 @@ export function SettingsPanel() {
               </SettingRow>
 
               <SettingRow
+                label="Prevent sleep while running"
+                description="Keep the computer awake while one or more agents are running"
+              >
+                <Switch
+                  checked={settings.preventSleepWhileRunning}
+                  onChange={(_, data) => update('preventSleepWhileRunning', data.checked)}
+                />
+              </SettingRow>
+
+              <SettingRow
                 label="Restore workspace"
                 description="Restore the last active workspace when the app starts"
               >

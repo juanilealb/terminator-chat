@@ -159,6 +159,8 @@ const api = {
       ipcRenderer.send(IPC.APP_SET_UNREAD_COUNT, count),
     setActiveWorkspace: (workspaceId: string | null) =>
       ipcRenderer.send(IPC.APP_SET_ACTIVE_WORKSPACE, workspaceId),
+    setPreventSleep: (enabled: boolean) =>
+      ipcRenderer.send(IPC.APP_SET_PREVENT_SLEEP, enabled),
     setThemePreference: (themePreference: ThemePreference) =>
       ipcRenderer.send(IPC.APP_SET_THEME_SOURCE, themePreference),
     minimizeWindow: () =>

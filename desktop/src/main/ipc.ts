@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app, BrowserWindow, clipboard, webContents } from 'electron'
+import { ipcMain, dialog, app, BrowserWindow, clipboard, webContents, powerSaveBlocker } from 'electron'
 import { join, relative, basename } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
@@ -24,6 +24,9 @@ const codexService = new CodexService()
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
 const terminalSessions = new Map<string, TerminalSession>()
+const preventSleepSenderIds = new Set<number>()
+const preventSleepTrackedSenderIds = new Set<number>()
+let preventSleepBlockerId: number | null = null
 const EDITOR_LAUNCH_GRACE_MS = (() => {
   const raw = Number.parseInt(process.env.TERMINATOR_EDITOR_LAUNCH_GRACE_MS ?? '', 10)
   if (Number.isFinite(raw)) {
@@ -163,6 +166,27 @@ function disposeTerminalSessionsForSender(senderId: number): void {
       disposeTerminalSession(sessionId)
     }
   }
+}
+
+function refreshPreventSleepBlocker(): void {
+  const shouldPreventSleep = preventSleepSenderIds.size > 0
+  if (shouldPreventSleep) {
+    if (preventSleepBlockerId === null || !powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+      preventSleepBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    }
+    return
+  }
+
+  if (preventSleepBlockerId !== null && powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+    powerSaveBlocker.stop(preventSleepBlockerId)
+  }
+  preventSleepBlockerId = null
+}
+
+function releasePreventSleepForSender(senderId: number): void {
+  preventSleepSenderIds.delete(senderId)
+  preventSleepTrackedSenderIds.delete(senderId)
+  refreshPreventSleepBlocker()
 }
 
 function serializeError(error: unknown): unknown {
@@ -686,6 +710,24 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
       return
     }
     setWindowActiveWorkspace(win, null)
+  })
+
+  ipcMain.on(IPC.APP_SET_PREVENT_SLEEP, (_e, enabled: unknown) => {
+    const senderId = _e.sender.id
+    const shouldEnable = enabled === true
+    if (!shouldEnable) {
+      releasePreventSleepForSender(senderId)
+      return
+    }
+
+    preventSleepSenderIds.add(senderId)
+    if (!preventSleepTrackedSenderIds.has(senderId)) {
+      preventSleepTrackedSenderIds.add(senderId)
+      _e.sender.once('destroyed', () => {
+        releasePreventSleepForSender(senderId)
+      })
+    }
+    refreshPreventSleepBlocker()
   })
 
   ipcMain.on(IPC.APP_SET_THEME_SOURCE, (_e, themePreference: unknown) => {
