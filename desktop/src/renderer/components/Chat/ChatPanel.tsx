@@ -1506,7 +1506,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalPreparing, setTerminalPreparing] = useState(false)
   const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null)
-  const [terminalRunning, setTerminalRunning] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -2100,7 +2099,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
   const handleTerminalClose = useCallback(() => {
     setTerminalOpen(false)
-    setTerminalRunning(false)
     const previousSessionId = terminalSessionRef.current
     if (previousSessionId) {
       terminalSessionRef.current = null
@@ -2108,22 +2106,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       void window.api.terminal.disposeSession(previousSessionId).catch(() => {})
     }
   }, [])
-
-  const handleTerminalStop = useCallback(async () => {
-    if (!terminalSessionId) return
-    try {
-      await window.api.terminal.killCommand(terminalSessionId)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to stop command'
-      addToast({ id: crypto.randomUUID(), message, type: 'error' })
-    }
-  }, [terminalSessionId, addToast])
-
-  const handleTerminalClear = useCallback(async () => {
-    terminalRef.current?.clear()
-    if (!terminalSessionId) return
-    await window.api.terminal.clearOutput(terminalSessionId).catch(() => {})
-  }, [terminalSessionId])
 
   useEffect(() => {
     terminalSessionRef.current = terminalSessionId
@@ -2167,9 +2149,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       }
     }
 
-    window.addEventListener('keydown', handler)
+    window.addEventListener('keydown', handler, true)
     return () => {
-      window.removeEventListener('keydown', handler)
+      window.removeEventListener('keydown', handler, true)
     }
   }, [terminalOpen, handleTerminalClose])
 
@@ -2240,7 +2222,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       }
 
       if (event.type === 'command.started') {
-        setTerminalRunning(true)
         return
       }
 
@@ -2250,17 +2231,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       }
 
       if (event.type === 'command.completed') {
-        setTerminalRunning(false)
         return
       }
 
       if (event.type === 'command.cancelled') {
-        setTerminalRunning(false)
         return
       }
 
       if (event.type === 'command.failed') {
-        setTerminalRunning(false)
+        return
       }
     })
 
@@ -3571,36 +3550,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
               aria-label="Resize terminal"
               aria-orientation="horizontal"
             />
-            <div className={styles.terminalDockHeader}>
-              <span className={styles.terminalDockTitle}>Terminal</span>
-              <span className={styles.terminalDockStatus}>
-                {terminalPreparing ? 'Starting...' : terminalRunning ? 'Running' : 'Ready'}
-              </span>
-              <div className={styles.terminalDockActions}>
-                <button
-                  type="button"
-                  className={styles.terminalDockActionBtn}
-                  onClick={() => { void handleTerminalClear() }}
-                >
-                  Clear
-                </button>
-                <button
-                  type="button"
-                  className={styles.terminalDockActionBtn}
-                  onClick={() => { void handleTerminalStop() }}
-                  disabled={!terminalSessionId}
-                >
-                  Stop
-                </button>
-                <button
-                  type="button"
-                  className={styles.terminalDockActionBtn}
-                  onClick={handleTerminalClose}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
             <div className={styles.terminalDockOutput}>
               <div ref={terminalHostRef} className={styles.terminalDockHost} />
             </div>

@@ -114,7 +114,7 @@ export function useShortcuts() {
         return
       }
       // Focus chat
-      if (!shift && !alt && e.key === 'j') {
+      if (!shift && !alt && e.key === 'k') {
         consume()
         store.focusOrCreateChat()
         return
