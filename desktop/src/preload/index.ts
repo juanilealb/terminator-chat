@@ -4,6 +4,7 @@ import type {
   AgentActivitySnapshot,
   AgentNotifyEvent,
   ChatEventPayload,
+  TerminalEventPayload,
   ThemeChangedPayload,
   ThemePreference,
 } from '../shared/ipc-channels'
@@ -158,6 +159,8 @@ const api = {
       ipcRenderer.send(IPC.APP_SET_UNREAD_COUNT, count),
     setActiveWorkspace: (workspaceId: string | null) =>
       ipcRenderer.send(IPC.APP_SET_ACTIVE_WORKSPACE, workspaceId),
+    setPreventSleep: (enabled: boolean) =>
+      ipcRenderer.send(IPC.APP_SET_PREVENT_SLEEP, enabled),
     setThemePreference: (themePreference: ThemePreference) =>
       ipcRenderer.send(IPC.APP_SET_THEME_SOURCE, themePreference),
     minimizeWindow: () =>
@@ -324,6 +327,30 @@ const api = {
       ipcRenderer.on(IPC.CHAT_EVENT, listener)
       return () => {
         ipcRenderer.removeListener(IPC.CHAT_EVENT, listener)
+      }
+    },
+  },
+
+  terminal: {
+    createSession: (worktreePath: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_CREATE_SESSION, worktreePath) as Promise<{ sessionId: string }>,
+    disposeSession: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_DISPOSE_SESSION, sessionId),
+    runCommand: (sessionId: string, command: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_RUN_COMMAND, sessionId, command) as Promise<{ started: true }>,
+    writeInput: (sessionId: string, data: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_WRITE_INPUT, sessionId, data) as Promise<{ written: boolean }>,
+    resize: (sessionId: string, cols: number, rows: number) =>
+      ipcRenderer.invoke(IPC.TERMINAL_RESIZE, sessionId, cols, rows),
+    killCommand: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_KILL_COMMAND, sessionId) as Promise<{ stopped: boolean }>,
+    clearOutput: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_CLEAR_OUTPUT, sessionId),
+    onEvent: (callback: (event: TerminalEventPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: TerminalEventPayload) => callback(data)
+      ipcRenderer.on(IPC.TERMINAL_EVENT, listener)
+      return () => {
+        ipcRenderer.removeListener(IPC.TERMINAL_EVENT, listener)
       }
     },
   },

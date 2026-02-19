@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app, BrowserWindow, clipboard } from 'electron'
+import { ipcMain, dialog, app, BrowserWindow, clipboard, webContents, powerSaveBlocker } from 'electron'
 import { join, relative, basename } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
@@ -6,7 +6,8 @@ import { tmpdir } from 'os'
 import { watch, type FSWatcher } from 'fs'
 import { pathToFileURL } from 'url'
 import { IPC } from '../shared/ipc-channels'
-import type { ThemePreference } from '../shared/ipc-channels'
+import type { IPty } from 'node-pty'
+import type { TerminalEventPayload, ThemePreference } from '../shared/ipc-channels'
 import type { CreateWorktreeProgressEvent } from '../shared/workspace-creation'
 import { debugLog, toPosixPath } from '@shared/platform'
 import { GitService } from './git-service'
@@ -22,6 +23,10 @@ const codexService = new CodexService()
 
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
+const terminalSessions = new Map<string, TerminalSession>()
+const preventSleepSenderIds = new Set<number>()
+const preventSleepTrackedSenderIds = new Set<number>()
+let preventSleepBlockerId: number | null = null
 const EDITOR_LAUNCH_GRACE_MS = (() => {
   const raw = Number.parseInt(process.env.TERMINATOR_EDITOR_LAUNCH_GRACE_MS ?? '', 10)
   if (Number.isFinite(raw)) {
@@ -29,6 +34,160 @@ const EDITOR_LAUNCH_GRACE_MS = (() => {
   }
   return 2500
 })()
+
+interface TerminalSession {
+  sessionId: string
+  senderId: number
+  worktreePath: string
+  ptyProcess: IPty | null
+  activeCommand: { command: string; token: string } | null
+  markerCarry: string
+}
+
+function emitTerminalEvent(senderId: number, payload: TerminalEventPayload): void {
+  const sender = webContents.fromId(senderId)
+  if (!sender || sender.isDestroyed()) return
+  sender.send(IPC.TERMINAL_EVENT, payload)
+}
+
+function getOwnedTerminalSession(senderId: number, sessionId: string): TerminalSession {
+  const session = terminalSessions.get(sessionId)
+  if (!session) {
+    throw new Error('Terminal session not found')
+  }
+  if (session.senderId !== senderId) {
+    throw new Error('Terminal session is owned by another window')
+  }
+  return session
+}
+
+function stopTerminalProcess(session: TerminalSession): boolean {
+  if (!session.ptyProcess) return false
+  session.ptyProcess.kill()
+  session.ptyProcess = null
+  session.activeCommand = null
+  session.markerCarry = ''
+  return true
+}
+
+function emitTerminalOutput(session: TerminalSession, chunk: string): void {
+  if (!chunk) return
+  emitTerminalEvent(session.senderId, {
+    sessionId: session.sessionId,
+    type: 'command.output',
+    ts: Date.now(),
+    stream: 'stdout',
+    chunk,
+  })
+}
+
+function longestTokenPrefixSuffix(text: string, token: string): number {
+  const maxLen = Math.min(token.length - 1, text.length)
+  for (let len = maxLen; len > 0; len -= 1) {
+    if (token.startsWith(text.slice(-len))) return len
+  }
+  return 0
+}
+
+function processTerminalData(session: TerminalSession, data: string): void {
+  if (!session.activeCommand) {
+    emitTerminalOutput(session, data)
+    return
+  }
+
+  const token = session.activeCommand.token
+  let pending = `${session.markerCarry}${data}`
+  session.markerCarry = ''
+
+  while (pending.length > 0) {
+    const tokenIndex = pending.indexOf(token)
+    if (tokenIndex === -1) {
+      const keepLen = longestTokenPrefixSuffix(pending, token)
+      const flushText = pending.slice(0, pending.length - keepLen)
+      emitTerminalOutput(session, flushText)
+      session.markerCarry = pending.slice(pending.length - keepLen)
+      return
+    }
+
+    const beforeToken = pending.slice(0, tokenIndex)
+    emitTerminalOutput(session, beforeToken)
+
+    const afterToken = pending.slice(tokenIndex + token.length)
+    const exitMatch = afterToken.match(/^(-?\d+)/)
+    if (!exitMatch) {
+      session.markerCarry = `${token}${afterToken}`
+      return
+    }
+
+    const exitCode = Number.parseInt(exitMatch[1] ?? '1', 10)
+    let consumed = (exitMatch[1] ?? '').length
+    if (afterToken.slice(consumed).startsWith('\r\n')) consumed += 2
+    else if (afterToken.slice(consumed).startsWith('\n')) consumed += 1
+
+    const finishedSessionId = session.sessionId
+    const completionType = exitCode === 0 ? 'command.completed' : 'command.failed'
+    emitTerminalEvent(session.senderId, {
+      sessionId: finishedSessionId,
+      type: completionType,
+      ts: Date.now(),
+      exitCode,
+    })
+    session.activeCommand = null
+    session.markerCarry = ''
+
+    pending = afterToken.slice(consumed)
+    emitTerminalOutput(session, pending)
+    return
+  }
+}
+
+function buildTerminalWrappedCommand(command: string, token: string): string {
+  if (process.platform === 'win32') {
+    return `& { ${command} }; $__tc_ec = $LASTEXITCODE; if ($null -eq $__tc_ec) { $__tc_ec = 0 }; Write-Output '${token}'$__tc_ec`
+  }
+  return `{ ${command}; }; __tc_ec=$?; printf '${token}%s\\n' "$__tc_ec"`
+}
+
+function getTerminalEnv(): Record<string, string> {
+  const entries = Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  return Object.fromEntries(entries)
+}
+
+function disposeTerminalSession(sessionId: string): void {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return
+  stopTerminalProcess(session)
+  terminalSessions.delete(sessionId)
+}
+
+function disposeTerminalSessionsForSender(senderId: number): void {
+  for (const [sessionId, session] of terminalSessions.entries()) {
+    if (session.senderId === senderId) {
+      disposeTerminalSession(sessionId)
+    }
+  }
+}
+
+function refreshPreventSleepBlocker(): void {
+  const shouldPreventSleep = preventSleepSenderIds.size > 0
+  if (shouldPreventSleep) {
+    if (preventSleepBlockerId === null || !powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+      preventSleepBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    }
+    return
+  }
+
+  if (preventSleepBlockerId !== null && powerSaveBlocker.isStarted(preventSleepBlockerId)) {
+    powerSaveBlocker.stop(preventSleepBlockerId)
+  }
+  preventSleepBlockerId = null
+}
+
+function releasePreventSleepForSender(senderId: number): void {
+  preventSleepSenderIds.delete(senderId)
+  preventSleepTrackedSenderIds.delete(senderId)
+  refreshPreventSleepBlocker()
+}
 
 function serializeError(error: unknown): unknown {
   if (error instanceof Error) {
@@ -553,6 +712,24 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     setWindowActiveWorkspace(win, null)
   })
 
+  ipcMain.on(IPC.APP_SET_PREVENT_SLEEP, (_e, enabled: unknown) => {
+    const senderId = _e.sender.id
+    const shouldEnable = enabled === true
+    if (!shouldEnable) {
+      releasePreventSleepForSender(senderId)
+      return
+    }
+
+    preventSleepSenderIds.add(senderId)
+    if (!preventSleepTrackedSenderIds.has(senderId)) {
+      preventSleepTrackedSenderIds.add(senderId)
+      _e.sender.once('destroyed', () => {
+        releasePreventSleepForSender(senderId)
+      })
+    }
+    refreshPreventSleepBlocker()
+  })
+
   ipcMain.on(IPC.APP_SET_THEME_SOURCE, (_e, themePreference: unknown) => {
     if (themePreference === 'system' || themePreference === 'dark' || themePreference === 'light') {
       options.onThemePreferenceChanged?.(themePreference)
@@ -1022,6 +1199,154 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   ipcMain.handle(IPC.CLIPBOARD_WRITE_TEXT, async (_e, text: string) => {
     clipboard.writeText(text ?? '')
+  })
+
+  // ── Terminal handlers ──
+  ipcMain.handle(IPC.TERMINAL_CREATE_SESSION, async (e, worktreePath: string) => {
+    if (typeof worktreePath !== 'string' || !worktreePath.trim()) {
+      throw new Error('Invalid terminal path')
+    }
+    if (!existsSync(worktreePath)) {
+      throw new Error('Terminal path does not exist')
+    }
+
+    const { spawn } = await import('node-pty')
+    const isWindows = process.platform === 'win32'
+    const shell = isWindows ? 'powershell.exe' : (process.env.SHELL || '/bin/bash')
+    const args = isWindows ? ['-NoLogo', '-NoProfile'] : []
+
+    const sessionId = crypto.randomUUID()
+    const senderId = e.sender.id
+    const session: TerminalSession = {
+      sessionId,
+      senderId,
+      worktreePath,
+      ptyProcess: null,
+      activeCommand: null,
+      markerCarry: '',
+    }
+    const ptyProcess = spawn(shell, args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      cwd: worktreePath,
+      env: getTerminalEnv(),
+    })
+    session.ptyProcess = ptyProcess
+    terminalSessions.set(sessionId, session)
+
+    ptyProcess.onData((chunk) => {
+      processTerminalData(session, chunk)
+    })
+
+    ptyProcess.onExit(({ exitCode }) => {
+      if (session.activeCommand) {
+        emitTerminalEvent(session.senderId, {
+          sessionId: session.sessionId,
+          type: 'command.failed',
+          ts: Date.now(),
+          exitCode,
+          message: 'Terminal session exited unexpectedly',
+        })
+        session.activeCommand = null
+      }
+      session.ptyProcess = null
+      terminalSessions.delete(session.sessionId)
+    })
+
+    e.sender.once('destroyed', () => {
+      disposeTerminalSessionsForSender(senderId)
+    })
+
+    return { sessionId }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_DISPOSE_SESSION, async (e, sessionId: string) => {
+    getOwnedTerminalSession(e.sender.id, sessionId)
+    disposeTerminalSession(sessionId)
+  })
+
+  ipcMain.handle(IPC.TERMINAL_CLEAR_OUTPUT, async (e, sessionId: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    session.markerCarry = ''
+    emitTerminalEvent(e.sender.id, {
+      sessionId,
+      type: 'session.cleared',
+      ts: Date.now(),
+    })
+  })
+
+  ipcMain.handle(IPC.TERMINAL_KILL_COMMAND, async (e, sessionId: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    if (!session.ptyProcess) {
+      return { stopped: false }
+    }
+
+    session.ptyProcess.write('\u0003')
+    if (session.activeCommand) {
+      session.activeCommand = null
+      session.markerCarry = ''
+    }
+    emitTerminalEvent(session.senderId, {
+      sessionId,
+      type: 'command.cancelled',
+      ts: Date.now(),
+    })
+
+    const stopped = true
+    return { stopped }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_RUN_COMMAND, async (e, sessionId: string, command: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    const normalizedCommand = typeof command === 'string' ? command.trim() : ''
+    if (!normalizedCommand) {
+      throw new Error('Command is required')
+    }
+    if (!session.ptyProcess) {
+      throw new Error('Terminal session is not available')
+    }
+    if (session.activeCommand) {
+      throw new Error('A command is already running in this terminal')
+    }
+
+    const token = `__TC_DONE_${crypto.randomUUID().replace(/-/g, '')}__`
+    session.activeCommand = { command: normalizedCommand, token }
+    session.markerCarry = ''
+    const wrappedCommand = buildTerminalWrappedCommand(normalizedCommand, token)
+
+    emitTerminalEvent(session.senderId, {
+      sessionId,
+      type: 'command.started',
+      ts: Date.now(),
+      command: normalizedCommand,
+    })
+    session.ptyProcess.write(`${wrappedCommand}\r`)
+
+    return { started: true as const }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_WRITE_INPUT, async (e, sessionId: string, data: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    if (!session.ptyProcess) {
+      throw new Error('Terminal session is not available')
+    }
+
+    const normalizedData = typeof data === 'string' ? data : ''
+    session.ptyProcess.write(normalizedData)
+    return { written: true as const }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_RESIZE, async (e, sessionId: string, cols: number, rows: number) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    if (!session.ptyProcess) {
+      return { resized: false as const }
+    }
+
+    const normalizedCols = Number.isFinite(cols) ? Math.max(20, Math.floor(cols)) : 120
+    const normalizedRows = Number.isFinite(rows) ? Math.max(4, Math.floor(rows)) : 30
+    session.ptyProcess.resize(normalizedCols, normalizedRows)
+    return { resized: true as const }
   })
 
   // ── State persistence handlers ──

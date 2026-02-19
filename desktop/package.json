@@ -24,14 +24,17 @@
         "@monaco-editor/react": "^4.7.0",
         "@openai/codex-sdk": "^0.101.0",
         "@pierre/diffs": "^1.0.10",
+        "@xterm/addon-fit": "^0.11.0",
         "allotment": "^1.20.5",
         "electron-vite": "^5.0.0",
         "geist": "^1.7.0",
         "monaco-editor": "^0.55.1",
         "node-cron": "^4.2.1",
+        "node-pty": "1.1.0",
         "react": "^19.2.4",
         "react-dom": "^19.2.4",
         "v8-compile-cache": "^2.4.0",
+        "xterm": "^5.3.0",
         "zustand": "^5.0.11"
     },
     "devDependencies": {
@@ -43,5 +46,8 @@
         "electron-builder": "^26.7.0",
         "playwright": "^1.58.2",
         "typescript": "^5.9.3"
+    },
+    "patchedDependencies": {
+        "node-pty@1.1.0": "patches/node-pty@1.1.0.patch"
     }
 }

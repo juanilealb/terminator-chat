@@ -21,9 +21,12 @@ import {
   dispatchPromptInsertForThread,
   queuePromptInsertForThread,
 } from '../../utils/template-routing'
-import type { ChatEventData, ChatThreadItemData } from '../../../shared/ipc-channels'
+import type { ChatEventData, ChatThreadItemData, TerminalEventPayload } from '../../../shared/ipc-channels'
 import { mapChatEventToMessage } from './chat-event-mapper'
 import styles from './ChatPanel.module.css'
+import { Terminal as XTerm } from 'xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import 'xterm/css/xterm.css'
 
 interface ChatPanelProps {
   threadId: string
@@ -184,6 +187,14 @@ interface QueuedPromptPayload {
   mode: SessionMode
   images: AttachedImage[]
   createdAt: number
+}
+
+const TERMINAL_DEFAULT_HEIGHT = 260
+const TERMINAL_MIN_HEIGHT = 160
+const TERMINAL_MAX_HEIGHT = 640
+
+function clampTerminalHeight(value: number): number {
+  return Math.max(TERMINAL_MIN_HEIGHT, Math.min(TERMINAL_MAX_HEIGHT, value))
 }
 
 interface InterruptThreadEventDetail {
@@ -1041,6 +1052,7 @@ interface ToolTimelineEntry {
   id: string
   type: 'command' | 'tool' | 'reasoning'
   title: string
+  fullCommand?: string
   subtitle?: string
   timestamp: number
   status: unknown
@@ -1086,6 +1098,7 @@ function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
       id: message.id,
       type: 'command',
       title: shortCommand,
+      fullCommand,
       timestamp: message.timestamp,
       status: message.metadata?.status,
       exitCode: typeof message.metadata?.exit_code === 'number' ? message.metadata.exit_code : undefined,
@@ -1152,7 +1165,13 @@ function formatToolTimelineDotClassName(entry: ToolTimelineEntry): string {
   return styles.toolTimelineDotRunning
 }
 
-function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
+function ToolTimelineGroup({
+  messages,
+  onRunCommand,
+}: {
+  messages: ChatMessage[]
+  onRunCommand?: (command: string) => void
+}) {
   const [showAll, setShowAll] = useState(false)
   const entries = useMemo(
     () => messages
@@ -1217,6 +1236,17 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
                   <summary className={styles.toolDetailSummary}>Output</summary>
                   <pre className={styles.commandOutput}>{entry.output}</pre>
                 </details>
+              )}
+              {entry.type === 'command' && entry.fullCommand && onRunCommand && (
+                <div className={styles.toolTimelineCommandActions}>
+                  <button
+                    type="button"
+                    className={styles.toolTimelineRunBtn}
+                    onClick={() => onRunCommand(entry.fullCommand)}
+                  >
+                    Run in terminal
+                  </button>
+                </div>
               )}
               {entry.details.map((detail) => (
                 <DetailSection key={`${entry.id}:${detail.label}`} label={detail.label} value={detail.value} />
@@ -1473,8 +1503,16 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [isDragging, setIsDragging] = useState(false)
   const [autoFollowMessages, setAutoFollowMessages] = useState(true)
   const [hasUnseenMessages, setHasUnseenMessages] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalPreparing, setTerminalPreparing] = useState(false)
+  const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null)
+  const [terminalRunning, setTerminalRunning] = useState(false)
+  const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const terminalHostRef = useRef<HTMLDivElement>(null)
+  const terminalRef = useRef<XTerm | null>(null)
+  const terminalFitRef = useRef<FitAddon | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // The tab's threadId is a local UUID. The real Codex SDK thread ID is different.
@@ -1484,6 +1522,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const activeTurnHasItemsRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
   const branchLockKeyRef = useRef<string | null>(null)
+  const terminalSessionRef = useRef<string | null>(null)
+  const terminalResizeRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const hasInitializedMessageScrollRef = useRef(false)
   const lastMessageVersionRef = useRef('')
 
@@ -1993,6 +2033,266 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     })
   }, [scrollToLatest])
 
+  const ensureTerminalSession = useCallback(async (): Promise<string | null> => {
+    if (terminalSessionId) return terminalSessionId
+    if (!worktreePath || terminalPreparing) return null
+
+    setTerminalPreparing(true)
+    try {
+      const created = await window.api.terminal.createSession(worktreePath)
+      setTerminalSessionId(created.sessionId)
+      terminalSessionRef.current = created.sessionId
+      return created.sessionId
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create terminal session'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+      return null
+    } finally {
+      setTerminalPreparing(false)
+    }
+  }, [terminalSessionId, worktreePath, terminalPreparing, addToast])
+
+  const runTerminalCommand = useCallback(async (command: string) => {
+    const nextCommand = command.trim()
+    if (!nextCommand) return
+
+    setTerminalOpen(true)
+    const sessionId = await ensureTerminalSession()
+    if (!sessionId) return
+
+    try {
+      await window.api.terminal.runCommand(sessionId, nextCommand)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to run terminal command'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+    }
+  }, [ensureTerminalSession, addToast])
+
+  const handleRunCommandInTerminal = useCallback((command: string) => {
+    setTerminalOpen(true)
+    void runTerminalCommand(command)
+  }, [runTerminalCommand])
+
+  const syncTerminalSize = useCallback(() => {
+    if (!terminalOpen) return
+    const fitAddon = terminalFitRef.current
+    const terminal = terminalRef.current
+    if (!fitAddon || !terminal) return
+
+    fitAddon.fit()
+    const sessionId = terminalSessionRef.current
+    if (sessionId) {
+      void window.api.terminal.resize(sessionId, terminal.cols, terminal.rows).catch(() => {})
+    }
+  }, [terminalOpen])
+
+  const handleTerminalResizePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    event.preventDefault()
+    terminalResizeRef.current = { startY: event.clientY, startHeight: terminalHeight }
+    document.body.style.cursor = 'ns-resize'
+    document.body.style.userSelect = 'none'
+  }, [terminalHeight])
+
+  const handleTerminalResizeReset = useCallback(() => {
+    setTerminalHeight(TERMINAL_DEFAULT_HEIGHT)
+  }, [])
+
+  const handleTerminalClose = useCallback(() => {
+    setTerminalOpen(false)
+    setTerminalRunning(false)
+    const previousSessionId = terminalSessionRef.current
+    if (previousSessionId) {
+      terminalSessionRef.current = null
+      setTerminalSessionId(null)
+      void window.api.terminal.disposeSession(previousSessionId).catch(() => {})
+    }
+  }, [])
+
+  const handleTerminalStop = useCallback(async () => {
+    if (!terminalSessionId) return
+    try {
+      await window.api.terminal.killCommand(terminalSessionId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to stop command'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+    }
+  }, [terminalSessionId, addToast])
+
+  const handleTerminalClear = useCallback(async () => {
+    terminalRef.current?.clear()
+    if (!terminalSessionId) return
+    await window.api.terminal.clearOutput(terminalSessionId).catch(() => {})
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    terminalSessionRef.current = terminalSessionId
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const drag = terminalResizeRef.current
+      if (!drag) return
+      const delta = drag.startY - event.clientY
+      setTerminalHeight(clampTerminalHeight(drag.startHeight + delta))
+    }
+
+    const stopDragging = () => {
+      if (!terminalResizeRef.current) return
+      terminalResizeRef.current = null
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', stopDragging)
+    window.addEventListener('pointercancel', stopDragging)
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', stopDragging)
+      window.removeEventListener('pointercancel', stopDragging)
+      stopDragging()
+    }
+  }, [])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.key.toLowerCase() !== 'j') return
+      event.preventDefault()
+      if (terminalOpen) {
+        handleTerminalClose()
+      } else {
+        setTerminalOpen(true)
+      }
+    }
+
+    window.addEventListener('keydown', handler)
+    return () => {
+      window.removeEventListener('keydown', handler)
+    }
+  }, [terminalOpen, handleTerminalClose])
+
+  useEffect(() => {
+    if (!terminalOpen || terminalSessionId || terminalPreparing) return
+    void ensureTerminalSession()
+  }, [terminalOpen, terminalSessionId, terminalPreparing, ensureTerminalSession])
+
+  useEffect(() => {
+    if (!terminalOpen || !terminalSessionId) return
+    const host = terminalHostRef.current
+    if (!host) return
+    if (terminalRef.current) return
+
+    const terminal = new XTerm({
+      convertEol: false,
+      cursorBlink: true,
+      fontFamily: 'Consolas, "Courier New", monospace',
+      fontSize: 13,
+      lineHeight: 1.2,
+      theme: {
+        background: '#000000',
+        foreground: '#e6e6e6',
+        cursor: '#f0f0f0',
+        selectionBackground: '#234a7a',
+      },
+    })
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(host)
+    terminal.focus()
+
+    terminalRef.current = terminal
+    terminalFitRef.current = fitAddon
+
+    const inputDisposable = terminal.onData((data) => {
+      const sessionId = terminalSessionRef.current
+      if (!sessionId) return
+      void window.api.terminal.writeInput(sessionId, data).catch(() => {})
+    })
+
+    requestAnimationFrame(() => {
+      syncTerminalSize()
+    })
+
+    return () => {
+      inputDisposable.dispose()
+      terminal.dispose()
+      if (terminalRef.current === terminal) {
+        terminalRef.current = null
+      }
+      if (terminalFitRef.current === fitAddon) {
+        terminalFitRef.current = null
+      }
+    }
+  }, [terminalOpen, terminalSessionId, syncTerminalSize])
+
+  useEffect(() => {
+    if (!terminalSessionId) return
+
+    const unsubscribe = window.api.terminal.onEvent((event: TerminalEventPayload) => {
+      if (event.sessionId !== terminalSessionId) return
+      const terminal = terminalRef.current
+
+      if (event.type === 'session.cleared') {
+        terminal?.clear()
+        return
+      }
+
+      if (event.type === 'command.started') {
+        setTerminalRunning(true)
+        return
+      }
+
+      if (event.type === 'command.output') {
+        terminal?.write(event.chunk ?? '')
+        return
+      }
+
+      if (event.type === 'command.completed') {
+        setTerminalRunning(false)
+        return
+      }
+
+      if (event.type === 'command.cancelled') {
+        setTerminalRunning(false)
+        return
+      }
+
+      if (event.type === 'command.failed') {
+        setTerminalRunning(false)
+      }
+    })
+
+    return unsubscribe
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    if (!terminalOpen) return
+    const rafId = requestAnimationFrame(() => {
+      syncTerminalSize()
+      terminalRef.current?.focus()
+    })
+    return () => {
+      cancelAnimationFrame(rafId)
+    }
+  }, [terminalOpen, terminalHeight, syncTerminalSize])
+
+  useEffect(() => {
+    if (!terminalOpen) return
+    const onWindowResize = () => {
+      syncTerminalSize()
+    }
+    window.addEventListener('resize', onWindowResize)
+    return () => {
+      window.removeEventListener('resize', onWindowResize)
+    }
+  }, [terminalOpen, syncTerminalSize])
+
+  useEffect(() => {
+    handleTerminalClose()
+  }, [threadId, workspaceId, worktreePath, handleTerminalClose])
+
   useEffect(() => {
     let cancelled = false
     const listModels = (window.api.chat as { listModels?: () => Promise<DropdownOption[]> }).listModels
@@ -2038,6 +2338,11 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       const previousThreadId = realThreadIdRef.current
       if (previousThreadId) {
         void window.api.chat.destroyThread(previousThreadId).catch(() => {})
+      }
+      const previousTerminalSessionId = terminalSessionRef.current
+      if (previousTerminalSessionId) {
+        void window.api.terminal.disposeSession(previousTerminalSessionId).catch(() => {})
+        terminalSessionRef.current = null
       }
       updateThreadStatusAndLock('idle')
       releaseOwnedBranchLock()
@@ -3014,6 +3319,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
               <ToolTimelineGroup
                 key={`tool-group:${block.messages[0]!.id}:${block.messages[block.messages.length - 1]!.id}`}
                 messages={block.messages}
+                onRunCommand={handleRunCommandInTerminal}
               />
             ) : (
               <MessageBubble
@@ -3143,6 +3449,25 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
             <div className={styles.toolbarSpacer} />
 
+            <button
+              className={`${styles.attachBtn} ${terminalOpen ? styles.terminalToggleActive : ''}`}
+              onClick={() => {
+                if (terminalOpen) {
+                  handleTerminalClose()
+                } else {
+                  setTerminalOpen(true)
+                }
+              }}
+              disabled={terminalPreparing}
+              title={terminalOpen ? 'Hide terminal (Ctrl+J)' : 'Show terminal (Ctrl+J)'}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 3.5h11v9h-11z" />
+                <path d="M5.5 7.5l-2 1.5 2 1.5" />
+                <path d="M7.5 10.5h3" />
+              </svg>
+            </button>
+
             {/* Attach button */}
             <button
               className={styles.attachBtn}
@@ -3234,6 +3559,51 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
                 void handleSwitchBranchContext(value)
               }}
             />
+          </div>
+        )}
+        {terminalOpen && (
+          <div className={styles.terminalDock} style={{ height: `${terminalHeight}px` }}>
+            <div
+              className={styles.terminalDockResizeHandle}
+              onPointerDown={handleTerminalResizePointerDown}
+              onDoubleClick={handleTerminalResizeReset}
+              role="separator"
+              aria-label="Resize terminal"
+              aria-orientation="horizontal"
+            />
+            <div className={styles.terminalDockHeader}>
+              <span className={styles.terminalDockTitle}>Terminal</span>
+              <span className={styles.terminalDockStatus}>
+                {terminalPreparing ? 'Starting...' : terminalRunning ? 'Running' : 'Ready'}
+              </span>
+              <div className={styles.terminalDockActions}>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={() => { void handleTerminalClear() }}
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={() => { void handleTerminalStop() }}
+                  disabled={!terminalSessionId}
+                >
+                  Stop
+                </button>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={handleTerminalClose}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className={styles.terminalDockOutput}>
+              <div ref={terminalHostRef} className={styles.terminalDockHost} />
+            </div>
           </div>
         )}
       </div>

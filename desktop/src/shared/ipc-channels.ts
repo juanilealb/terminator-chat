@@ -156,6 +156,25 @@ export interface ChatEventPayload {
   data: ChatEventData
 }
 
+export type TerminalEventKind =
+  | 'command.started'
+  | 'command.output'
+  | 'command.completed'
+  | 'command.failed'
+  | 'command.cancelled'
+  | 'session.cleared'
+
+export interface TerminalEventPayload {
+  sessionId: string
+  type: TerminalEventKind
+  ts: number
+  command?: string
+  chunk?: string
+  stream?: 'stdout' | 'stderr'
+  exitCode?: number | null
+  message?: string
+}
+
 // IPC channel constants shared between main and renderer
 
 export const IPC = {
@@ -202,6 +221,7 @@ export const IPC = {
   APP_GET_DATA_PATH: 'app:get-data-path',
   APP_SET_UNREAD_COUNT: 'app:set-unread-count',
   APP_SET_ACTIVE_WORKSPACE: 'app:set-active-workspace',
+  APP_SET_PREVENT_SLEEP: 'app:set-prevent-sleep',
   APP_OPEN_DIRECTORY: 'app:open-directory',
   APP_SET_THEME_SOURCE: 'app:set-theme-source',
   APP_WINDOW_MINIMIZE: 'app:window-minimize',
@@ -238,6 +258,16 @@ export const IPC = {
   CHAT_DESTROY_THREAD: 'chat:destroy-thread',
   CHAT_EVENT: 'chat:event',
   CHAT_RESUME: 'chat:resume',
+
+  // Integrated terminal
+  TERMINAL_CREATE_SESSION: 'terminal:create-session',
+  TERMINAL_DISPOSE_SESSION: 'terminal:dispose-session',
+  TERMINAL_RUN_COMMAND: 'terminal:run-command',
+  TERMINAL_WRITE_INPUT: 'terminal:write-input',
+  TERMINAL_RESIZE: 'terminal:resize',
+  TERMINAL_KILL_COMMAND: 'terminal:kill-command',
+  TERMINAL_CLEAR_OUTPUT: 'terminal:clear-output',
+  TERMINAL_EVENT: 'terminal:event',
 
   // GitHub operations
   GITHUB_GET_PR_STATUSES: 'github:get-pr-statuses',
