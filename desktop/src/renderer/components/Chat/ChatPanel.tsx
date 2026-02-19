@@ -21,7 +21,7 @@ import {
   dispatchPromptInsertForThread,
   queuePromptInsertForThread,
 } from '../../utils/template-routing'
-import type { ChatEventData, ChatThreadItemData } from '../../../shared/ipc-channels'
+import type { ChatEventData, ChatThreadItemData, TerminalEventPayload } from '../../../shared/ipc-channels'
 import { mapChatEventToMessage } from './chat-event-mapper'
 import styles from './ChatPanel.module.css'
 
@@ -184,6 +184,14 @@ interface QueuedPromptPayload {
   mode: SessionMode
   images: AttachedImage[]
   createdAt: number
+}
+
+const TERMINAL_OUTPUT_MAX_CHARS = 120_000
+
+function appendTerminalOutput(current: string, chunk: string): string {
+  const next = `${current}${chunk}`
+  if (next.length <= TERMINAL_OUTPUT_MAX_CHARS) return next
+  return next.slice(next.length - TERMINAL_OUTPUT_MAX_CHARS)
 }
 
 interface InterruptThreadEventDetail {
@@ -1041,6 +1049,7 @@ interface ToolTimelineEntry {
   id: string
   type: 'command' | 'tool' | 'reasoning'
   title: string
+  fullCommand?: string
   subtitle?: string
   timestamp: number
   status: unknown
@@ -1086,6 +1095,7 @@ function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
       id: message.id,
       type: 'command',
       title: shortCommand,
+      fullCommand,
       timestamp: message.timestamp,
       status: message.metadata?.status,
       exitCode: typeof message.metadata?.exit_code === 'number' ? message.metadata.exit_code : undefined,
@@ -1152,7 +1162,13 @@ function formatToolTimelineDotClassName(entry: ToolTimelineEntry): string {
   return styles.toolTimelineDotRunning
 }
 
-function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
+function ToolTimelineGroup({
+  messages,
+  onRunCommand,
+}: {
+  messages: ChatMessage[]
+  onRunCommand?: (command: string) => void
+}) {
   const [showAll, setShowAll] = useState(false)
   const entries = useMemo(
     () => messages
@@ -1217,6 +1233,17 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
                   <summary className={styles.toolDetailSummary}>Output</summary>
                   <pre className={styles.commandOutput}>{entry.output}</pre>
                 </details>
+              )}
+              {entry.type === 'command' && entry.fullCommand && onRunCommand && (
+                <div className={styles.toolTimelineCommandActions}>
+                  <button
+                    type="button"
+                    className={styles.toolTimelineRunBtn}
+                    onClick={() => onRunCommand(entry.fullCommand)}
+                  >
+                    Run in terminal
+                  </button>
+                </div>
               )}
               {entry.details.map((detail) => (
                 <DetailSection key={`${entry.id}:${detail.label}`} label={detail.label} value={detail.value} />
@@ -1473,8 +1500,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [isDragging, setIsDragging] = useState(false)
   const [autoFollowMessages, setAutoFollowMessages] = useState(true)
   const [hasUnseenMessages, setHasUnseenMessages] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalPreparing, setTerminalPreparing] = useState(false)
+  const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null)
+  const [terminalOutput, setTerminalOutput] = useState('')
+  const [terminalCommand, setTerminalCommand] = useState('')
+  const [terminalRunning, setTerminalRunning] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const terminalOutputRef = useRef<HTMLPreElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // The tab's threadId is a local UUID. The real Codex SDK thread ID is different.
@@ -1484,6 +1518,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const activeTurnHasItemsRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
   const branchLockKeyRef = useRef<string | null>(null)
+  const terminalSessionRef = useRef<string | null>(null)
   const hasInitializedMessageScrollRef = useRef(false)
   const lastMessageVersionRef = useRef('')
 
@@ -1993,6 +2028,154 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     })
   }, [scrollToLatest])
 
+  const ensureTerminalSession = useCallback(async (): Promise<string | null> => {
+    if (terminalSessionId) return terminalSessionId
+    if (!worktreePath || terminalPreparing) return null
+
+    setTerminalPreparing(true)
+    try {
+      const created = await window.api.terminal.createSession(worktreePath)
+      setTerminalSessionId(created.sessionId)
+      terminalSessionRef.current = created.sessionId
+      return created.sessionId
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to create terminal session'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+      return null
+    } finally {
+      setTerminalPreparing(false)
+    }
+  }, [terminalSessionId, worktreePath, terminalPreparing, addToast])
+
+  const runTerminalCommand = useCallback(async (commandOverride?: string) => {
+    const nextCommand = (commandOverride ?? terminalCommand).trim()
+    if (!nextCommand) return
+
+    setTerminalOpen(true)
+    const sessionId = await ensureTerminalSession()
+    if (!sessionId) return
+
+    try {
+      await window.api.terminal.runCommand(sessionId, nextCommand)
+      if (!commandOverride) {
+        setTerminalCommand('')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to run terminal command'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+    }
+  }, [terminalCommand, ensureTerminalSession, addToast])
+
+  const handleRunCommandInTerminal = useCallback((command: string) => {
+    setTerminalOpen(true)
+    void runTerminalCommand(command)
+  }, [runTerminalCommand])
+
+  const handleTerminalStop = useCallback(async () => {
+    if (!terminalSessionId) return
+    try {
+      await window.api.terminal.killCommand(terminalSessionId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to stop command'
+      addToast({ id: crypto.randomUUID(), message, type: 'error' })
+    }
+  }, [terminalSessionId, addToast])
+
+  const handleTerminalClear = useCallback(async () => {
+    setTerminalOutput('')
+    if (!terminalSessionId) return
+    await window.api.terminal.clearOutput(terminalSessionId).catch(() => {})
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    terminalSessionRef.current = terminalSessionId
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.key.toLowerCase() !== 'j') return
+      event.preventDefault()
+      setTerminalOpen((current) => !current)
+    }
+
+    window.addEventListener('keydown', handler)
+    return () => {
+      window.removeEventListener('keydown', handler)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!terminalOpen || terminalSessionId || terminalPreparing) return
+    void ensureTerminalSession()
+  }, [terminalOpen, terminalSessionId, terminalPreparing, ensureTerminalSession])
+
+  useEffect(() => {
+    if (!terminalSessionId) return
+
+    const unsubscribe = window.api.terminal.onEvent((event: TerminalEventPayload) => {
+      if (event.sessionId !== terminalSessionId) return
+
+      if (event.type === 'session.cleared') {
+        setTerminalOutput('')
+        return
+      }
+
+      if (event.type === 'command.started') {
+        setTerminalRunning(true)
+        setTerminalOutput((current) => appendTerminalOutput(current, `\n$ ${event.command ?? ''}\n`))
+        return
+      }
+
+      if (event.type === 'command.output') {
+        setTerminalOutput((current) => appendTerminalOutput(current, event.chunk ?? ''))
+        return
+      }
+
+      if (event.type === 'command.completed') {
+        setTerminalRunning(false)
+        setTerminalOutput((current) => appendTerminalOutput(current, `\n[exit ${event.exitCode ?? 0}]\n`))
+        return
+      }
+
+      if (event.type === 'command.cancelled') {
+        setTerminalRunning(false)
+        setTerminalOutput((current) => appendTerminalOutput(current, '\n[cancelled]\n'))
+        return
+      }
+
+      if (event.type === 'command.failed') {
+        setTerminalRunning(false)
+        const suffix = typeof event.exitCode === 'number'
+          ? `\n[failed: exit ${event.exitCode}]\n`
+          : `\n[failed${event.message ? `: ${event.message}` : ''}]\n`
+        setTerminalOutput((current) => appendTerminalOutput(current, suffix))
+      }
+    })
+
+    return unsubscribe
+  }, [terminalSessionId])
+
+  useEffect(() => {
+    if (!terminalOpen) return
+    const outputEl = terminalOutputRef.current
+    if (!outputEl) return
+    outputEl.scrollTop = outputEl.scrollHeight
+  }, [terminalOutput, terminalOpen])
+
+  useEffect(() => {
+    setTerminalOpen(false)
+    setTerminalOutput('')
+    setTerminalCommand('')
+    setTerminalRunning(false)
+    const previousSessionId = terminalSessionRef.current
+    if (previousSessionId) {
+      terminalSessionRef.current = null
+      setTerminalSessionId(null)
+      void window.api.terminal.disposeSession(previousSessionId).catch(() => {})
+    }
+  }, [threadId, workspaceId, worktreePath])
+
   useEffect(() => {
     let cancelled = false
     const listModels = (window.api.chat as { listModels?: () => Promise<DropdownOption[]> }).listModels
@@ -2038,6 +2221,11 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       const previousThreadId = realThreadIdRef.current
       if (previousThreadId) {
         void window.api.chat.destroyThread(previousThreadId).catch(() => {})
+      }
+      const previousTerminalSessionId = terminalSessionRef.current
+      if (previousTerminalSessionId) {
+        void window.api.terminal.disposeSession(previousTerminalSessionId).catch(() => {})
+        terminalSessionRef.current = null
       }
       updateThreadStatusAndLock('idle')
       releaseOwnedBranchLock()
@@ -2742,6 +2930,12 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
   }, [handlePrimarySend, resetRuntimeThreadState])
 
+  const handleTerminalInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return
+    e.preventDefault()
+    void runTerminalCommand()
+  }, [runTerminalCommand])
+
   const handleTextareaInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
     // Auto-resize
@@ -3014,6 +3208,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
               <ToolTimelineGroup
                 key={`tool-group:${block.messages[0]!.id}:${block.messages[block.messages.length - 1]!.id}`}
                 messages={block.messages}
+                onRunCommand={handleRunCommandInTerminal}
               />
             ) : (
               <MessageBubble
@@ -3143,6 +3338,19 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
             <div className={styles.toolbarSpacer} />
 
+            <button
+              className={`${styles.attachBtn} ${terminalOpen ? styles.terminalToggleActive : ''}`}
+              onClick={() => setTerminalOpen((current) => !current)}
+              disabled={terminalPreparing}
+              title={terminalOpen ? 'Hide terminal (Ctrl+J)' : 'Show terminal (Ctrl+J)'}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 3.5h11v9h-11z" />
+                <path d="M5.5 7.5l-2 1.5 2 1.5" />
+                <path d="M7.5 10.5h3" />
+              </svg>
+            </button>
+
             {/* Attach button */}
             <button
               className={styles.attachBtn}
@@ -3209,6 +3417,62 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             style={{ display: 'none' }}
           />
         </div>
+        {terminalOpen && (
+          <div className={styles.terminalDock}>
+            <div className={styles.terminalDockHeader}>
+              <span className={styles.terminalDockTitle}>Terminal</span>
+              <span className={styles.terminalDockStatus}>
+                {terminalPreparing ? 'Starting...' : terminalRunning ? 'Running' : 'Ready'}
+              </span>
+              <div className={styles.terminalDockActions}>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={() => { void handleTerminalClear() }}
+                  disabled={terminalOutput.length === 0}
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={() => { void handleTerminalStop() }}
+                  disabled={!terminalRunning}
+                >
+                  Stop
+                </button>
+                <button
+                  type="button"
+                  className={styles.terminalDockActionBtn}
+                  onClick={() => setTerminalOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <pre ref={terminalOutputRef} className={styles.terminalDockOutput}>
+              {terminalOutput || 'Run a command to start.'}
+            </pre>
+            <div className={styles.terminalDockInputRow}>
+              <input
+                className={styles.terminalDockInput}
+                value={terminalCommand}
+                onChange={(event) => setTerminalCommand(event.target.value)}
+                onKeyDown={handleTerminalInputKeyDown}
+                placeholder="Type a command and press Enter"
+                disabled={terminalPreparing || terminalRunning}
+              />
+              <button
+                type="button"
+                className={styles.terminalDockRunBtn}
+                onClick={() => { void runTerminalCommand() }}
+                disabled={terminalPreparing || terminalRunning || terminalCommand.trim().length === 0}
+              >
+                Run
+              </button>
+            </div>
+          </div>
+        )}
         {workspace?.branch && (
           <div className={styles.contextRow}>
             <ContextDropdown

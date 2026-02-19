@@ -4,6 +4,7 @@ import type {
   AgentActivitySnapshot,
   AgentNotifyEvent,
   ChatEventPayload,
+  TerminalEventPayload,
   ThemeChangedPayload,
   ThemePreference,
 } from '../shared/ipc-channels'
@@ -324,6 +325,26 @@ const api = {
       ipcRenderer.on(IPC.CHAT_EVENT, listener)
       return () => {
         ipcRenderer.removeListener(IPC.CHAT_EVENT, listener)
+      }
+    },
+  },
+
+  terminal: {
+    createSession: (worktreePath: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_CREATE_SESSION, worktreePath) as Promise<{ sessionId: string }>,
+    disposeSession: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_DISPOSE_SESSION, sessionId),
+    runCommand: (sessionId: string, command: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_RUN_COMMAND, sessionId, command) as Promise<{ started: true }>,
+    killCommand: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_KILL_COMMAND, sessionId) as Promise<{ stopped: boolean }>,
+    clearOutput: (sessionId: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_CLEAR_OUTPUT, sessionId),
+    onEvent: (callback: (event: TerminalEventPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: TerminalEventPayload) => callback(data)
+      ipcRenderer.on(IPC.TERMINAL_EVENT, listener)
+      return () => {
+        ipcRenderer.removeListener(IPC.TERMINAL_EVENT, listener)
       }
     },
   },

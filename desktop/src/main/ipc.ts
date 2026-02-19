@@ -1,4 +1,4 @@
-import { ipcMain, dialog, app, BrowserWindow, clipboard } from 'electron'
+import { ipcMain, dialog, app, BrowserWindow, clipboard, webContents } from 'electron'
 import { join, relative, basename } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
@@ -6,7 +6,8 @@ import { tmpdir } from 'os'
 import { watch, type FSWatcher } from 'fs'
 import { pathToFileURL } from 'url'
 import { IPC } from '../shared/ipc-channels'
-import type { ThemePreference } from '../shared/ipc-channels'
+import type { ChildProcessWithoutNullStreams } from 'child_process'
+import type { TerminalEventPayload, ThemePreference } from '../shared/ipc-channels'
 import type { CreateWorktreeProgressEvent } from '../shared/workspace-creation'
 import { debugLog, toPosixPath } from '@shared/platform'
 import { GitService } from './git-service'
@@ -22,6 +23,7 @@ const codexService = new CodexService()
 
 // Filesystem watchers: dirPath → { watcher, debounceTimer }
 const fsWatchers = new Map<string, { watcher: FSWatcher; timer: ReturnType<typeof setTimeout> | null }>()
+const terminalSessions = new Map<string, TerminalSession>()
 const EDITOR_LAUNCH_GRACE_MS = (() => {
   const raw = Number.parseInt(process.env.TERMINATOR_EDITOR_LAUNCH_GRACE_MS ?? '', 10)
   if (Number.isFinite(raw)) {
@@ -29,6 +31,52 @@ const EDITOR_LAUNCH_GRACE_MS = (() => {
   }
   return 2500
 })()
+
+interface TerminalSession {
+  sessionId: string
+  senderId: number
+  worktreePath: string
+  activeProcess: ChildProcessWithoutNullStreams | null
+}
+
+function emitTerminalEvent(senderId: number, payload: TerminalEventPayload): void {
+  const sender = webContents.fromId(senderId)
+  if (!sender || sender.isDestroyed()) return
+  sender.send(IPC.TERMINAL_EVENT, payload)
+}
+
+function getOwnedTerminalSession(senderId: number, sessionId: string): TerminalSession {
+  const session = terminalSessions.get(sessionId)
+  if (!session) {
+    throw new Error('Terminal session not found')
+  }
+  if (session.senderId !== senderId) {
+    throw new Error('Terminal session is owned by another window')
+  }
+  return session
+}
+
+function stopTerminalProcess(session: TerminalSession): boolean {
+  const child = session.activeProcess
+  if (!child || child.killed) return false
+  child.kill()
+  return true
+}
+
+function disposeTerminalSession(sessionId: string): void {
+  const session = terminalSessions.get(sessionId)
+  if (!session) return
+  stopTerminalProcess(session)
+  terminalSessions.delete(sessionId)
+}
+
+function disposeTerminalSessionsForSender(senderId: number): void {
+  for (const [sessionId, session] of terminalSessions.entries()) {
+    if (session.senderId === senderId) {
+      disposeTerminalSession(sessionId)
+    }
+  }
+}
 
 function serializeError(error: unknown): unknown {
   if (error instanceof Error) {
@@ -1022,6 +1070,145 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   ipcMain.handle(IPC.CLIPBOARD_WRITE_TEXT, async (_e, text: string) => {
     clipboard.writeText(text ?? '')
+  })
+
+  // ── Terminal handlers ──
+  ipcMain.handle(IPC.TERMINAL_CREATE_SESSION, async (e, worktreePath: string) => {
+    if (typeof worktreePath !== 'string' || !worktreePath.trim()) {
+      throw new Error('Invalid terminal path')
+    }
+    if (!existsSync(worktreePath)) {
+      throw new Error('Terminal path does not exist')
+    }
+
+    const sessionId = crypto.randomUUID()
+    const senderId = e.sender.id
+    terminalSessions.set(sessionId, {
+      sessionId,
+      senderId,
+      worktreePath,
+      activeProcess: null,
+    })
+
+    e.sender.once('destroyed', () => {
+      disposeTerminalSessionsForSender(senderId)
+    })
+
+    return { sessionId }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_DISPOSE_SESSION, async (e, sessionId: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    stopTerminalProcess(session)
+    terminalSessions.delete(sessionId)
+  })
+
+  ipcMain.handle(IPC.TERMINAL_CLEAR_OUTPUT, async (e, sessionId: string) => {
+    getOwnedTerminalSession(e.sender.id, sessionId)
+    emitTerminalEvent(e.sender.id, {
+      sessionId,
+      type: 'session.cleared',
+      ts: Date.now(),
+    })
+  })
+
+  ipcMain.handle(IPC.TERMINAL_KILL_COMMAND, async (e, sessionId: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    const stopped = stopTerminalProcess(session)
+    return { stopped }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_RUN_COMMAND, async (e, sessionId: string, command: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    const normalizedCommand = typeof command === 'string' ? command.trim() : ''
+    if (!normalizedCommand) {
+      throw new Error('Command is required')
+    }
+    if (session.activeProcess) {
+      throw new Error('A command is already running in this terminal')
+    }
+
+    const { spawn } = await import('child_process')
+    const isWindows = process.platform === 'win32'
+    const shellCommand = isWindows ? 'powershell.exe' : '/bin/bash'
+    const shellArgs = isWindows
+      ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', normalizedCommand]
+      : ['-lc', normalizedCommand]
+    const child = spawn(shellCommand, shellArgs, {
+      cwd: session.worktreePath,
+      windowsHide: true,
+      env: process.env,
+    })
+
+    session.activeProcess = child
+    emitTerminalEvent(session.senderId, {
+      sessionId,
+      type: 'command.started',
+      ts: Date.now(),
+      command: normalizedCommand,
+    })
+
+    const onOutput = (stream: 'stdout' | 'stderr', chunk: Buffer | string) => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      if (!text) return
+      emitTerminalEvent(session.senderId, {
+        sessionId,
+        type: 'command.output',
+        ts: Date.now(),
+        stream,
+        chunk: text,
+      })
+    }
+
+    child.stdout.on('data', (chunk) => onOutput('stdout', chunk))
+    child.stderr.on('data', (chunk) => onOutput('stderr', chunk))
+
+    child.once('error', (error) => {
+      if (session.activeProcess === child) {
+        session.activeProcess = null
+      }
+      emitTerminalEvent(session.senderId, {
+        sessionId,
+        type: 'command.failed',
+        ts: Date.now(),
+        message: error instanceof Error ? error.message : 'Terminal failed to start command',
+      })
+    })
+
+    child.once('close', (code, signal) => {
+      if (session.activeProcess === child) {
+        session.activeProcess = null
+      }
+
+      if (signal) {
+        emitTerminalEvent(session.senderId, {
+          sessionId,
+          type: 'command.cancelled',
+          ts: Date.now(),
+          exitCode: code,
+        })
+        return
+      }
+
+      if (code === 0) {
+        emitTerminalEvent(session.senderId, {
+          sessionId,
+          type: 'command.completed',
+          ts: Date.now(),
+          exitCode: code,
+        })
+        return
+      }
+
+      emitTerminalEvent(session.senderId, {
+        sessionId,
+        type: 'command.failed',
+        ts: Date.now(),
+        exitCode: code,
+      })
+    })
+
+    return { started: true as const }
   })
 
   // ── State persistence handlers ──
