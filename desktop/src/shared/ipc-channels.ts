@@ -262,6 +262,8 @@ export const IPC = {
   TERMINAL_CREATE_SESSION: 'terminal:create-session',
   TERMINAL_DISPOSE_SESSION: 'terminal:dispose-session',
   TERMINAL_RUN_COMMAND: 'terminal:run-command',
+  TERMINAL_WRITE_INPUT: 'terminal:write-input',
+  TERMINAL_RESIZE: 'terminal:resize',
   TERMINAL_KILL_COMMAND: 'terminal:kill-command',
   TERMINAL_CLEAR_OUTPUT: 'terminal:clear-output',
   TERMINAL_EVENT: 'terminal:event',

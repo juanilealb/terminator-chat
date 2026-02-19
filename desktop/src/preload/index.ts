@@ -336,6 +336,10 @@ const api = {
       ipcRenderer.invoke(IPC.TERMINAL_DISPOSE_SESSION, sessionId),
     runCommand: (sessionId: string, command: string) =>
       ipcRenderer.invoke(IPC.TERMINAL_RUN_COMMAND, sessionId, command) as Promise<{ started: true }>,
+    writeInput: (sessionId: string, data: string) =>
+      ipcRenderer.invoke(IPC.TERMINAL_WRITE_INPUT, sessionId, data) as Promise<{ written: boolean }>,
+    resize: (sessionId: string, cols: number, rows: number) =>
+      ipcRenderer.invoke(IPC.TERMINAL_RESIZE, sessionId, cols, rows),
     killCommand: (sessionId: string) =>
       ipcRenderer.invoke(IPC.TERMINAL_KILL_COMMAND, sessionId) as Promise<{ stopped: boolean }>,
     clearOutput: (sessionId: string) =>

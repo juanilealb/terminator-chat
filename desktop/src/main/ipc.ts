@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { watch, type FSWatcher } from 'fs'
 import { pathToFileURL } from 'url'
 import { IPC } from '../shared/ipc-channels'
-import type { ChildProcessWithoutNullStreams } from 'child_process'
+import type { IPty } from 'node-pty'
 import type { TerminalEventPayload, ThemePreference } from '../shared/ipc-channels'
 import type { CreateWorktreeProgressEvent } from '../shared/workspace-creation'
 import { debugLog, toPosixPath } from '@shared/platform'
@@ -36,7 +36,9 @@ interface TerminalSession {
   sessionId: string
   senderId: number
   worktreePath: string
-  activeProcess: ChildProcessWithoutNullStreams | null
+  ptyProcess: IPty | null
+  activeCommand: { command: string; token: string } | null
+  markerCarry: string
 }
 
 function emitTerminalEvent(senderId: number, payload: TerminalEventPayload): void {
@@ -57,10 +59,95 @@ function getOwnedTerminalSession(senderId: number, sessionId: string): TerminalS
 }
 
 function stopTerminalProcess(session: TerminalSession): boolean {
-  const child = session.activeProcess
-  if (!child || child.killed) return false
-  child.kill()
+  if (!session.ptyProcess) return false
+  session.ptyProcess.kill()
+  session.ptyProcess = null
+  session.activeCommand = null
+  session.markerCarry = ''
   return true
+}
+
+function emitTerminalOutput(session: TerminalSession, chunk: string): void {
+  if (!chunk) return
+  emitTerminalEvent(session.senderId, {
+    sessionId: session.sessionId,
+    type: 'command.output',
+    ts: Date.now(),
+    stream: 'stdout',
+    chunk,
+  })
+}
+
+function longestTokenPrefixSuffix(text: string, token: string): number {
+  const maxLen = Math.min(token.length - 1, text.length)
+  for (let len = maxLen; len > 0; len -= 1) {
+    if (token.startsWith(text.slice(-len))) return len
+  }
+  return 0
+}
+
+function processTerminalData(session: TerminalSession, data: string): void {
+  if (!session.activeCommand) {
+    emitTerminalOutput(session, data)
+    return
+  }
+
+  const token = session.activeCommand.token
+  let pending = `${session.markerCarry}${data}`
+  session.markerCarry = ''
+
+  while (pending.length > 0) {
+    const tokenIndex = pending.indexOf(token)
+    if (tokenIndex === -1) {
+      const keepLen = longestTokenPrefixSuffix(pending, token)
+      const flushText = pending.slice(0, pending.length - keepLen)
+      emitTerminalOutput(session, flushText)
+      session.markerCarry = pending.slice(pending.length - keepLen)
+      return
+    }
+
+    const beforeToken = pending.slice(0, tokenIndex)
+    emitTerminalOutput(session, beforeToken)
+
+    const afterToken = pending.slice(tokenIndex + token.length)
+    const exitMatch = afterToken.match(/^(-?\d+)/)
+    if (!exitMatch) {
+      session.markerCarry = `${token}${afterToken}`
+      return
+    }
+
+    const exitCode = Number.parseInt(exitMatch[1] ?? '1', 10)
+    let consumed = (exitMatch[1] ?? '').length
+    if (afterToken.slice(consumed).startsWith('\r\n')) consumed += 2
+    else if (afterToken.slice(consumed).startsWith('\n')) consumed += 1
+
+    const finishedSessionId = session.sessionId
+    const completionType = exitCode === 0 ? 'command.completed' : 'command.failed'
+    emitTerminalEvent(session.senderId, {
+      sessionId: finishedSessionId,
+      type: completionType,
+      ts: Date.now(),
+      exitCode,
+    })
+    session.activeCommand = null
+    session.markerCarry = ''
+
+    pending = afterToken.slice(consumed)
+    emitTerminalOutput(session, pending)
+    return
+  }
+}
+
+function buildTerminalWrappedCommand(command: string, token: string): string {
+  if (process.platform === 'win32') {
+    return `& { ${command} }; $__tc_ec = $LASTEXITCODE; if ($null -eq $__tc_ec) { $__tc_ec = 0 }; Write-Output '${token}'$__tc_ec`
+  }
+  return `{ ${command}; }; __tc_ec=$?; printf '${token}%s\\n' "$__tc_ec"`
+}
+
+function getTerminalEnv(): Record<string, string> {
+  const entries = Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  return Object.fromEntries(entries)
 }
 
 function disposeTerminalSession(sessionId: string): void {
@@ -1081,13 +1168,48 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
       throw new Error('Terminal path does not exist')
     }
 
+    const { spawn } = await import('node-pty')
+    const isWindows = process.platform === 'win32'
+    const shell = isWindows ? 'powershell.exe' : (process.env.SHELL || '/bin/bash')
+    const args = isWindows ? ['-NoLogo', '-NoProfile'] : []
+
     const sessionId = crypto.randomUUID()
     const senderId = e.sender.id
-    terminalSessions.set(sessionId, {
+    const session: TerminalSession = {
       sessionId,
       senderId,
       worktreePath,
-      activeProcess: null,
+      ptyProcess: null,
+      activeCommand: null,
+      markerCarry: '',
+    }
+    const ptyProcess = spawn(shell, args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      cwd: worktreePath,
+      env: getTerminalEnv(),
+    })
+    session.ptyProcess = ptyProcess
+    terminalSessions.set(sessionId, session)
+
+    ptyProcess.onData((chunk) => {
+      processTerminalData(session, chunk)
+    })
+
+    ptyProcess.onExit(({ exitCode }) => {
+      if (session.activeCommand) {
+        emitTerminalEvent(session.senderId, {
+          sessionId: session.sessionId,
+          type: 'command.failed',
+          ts: Date.now(),
+          exitCode,
+          message: 'Terminal session exited unexpectedly',
+        })
+        session.activeCommand = null
+      }
+      session.ptyProcess = null
+      terminalSessions.delete(session.sessionId)
     })
 
     e.sender.once('destroyed', () => {
@@ -1098,13 +1220,13 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
   })
 
   ipcMain.handle(IPC.TERMINAL_DISPOSE_SESSION, async (e, sessionId: string) => {
-    const session = getOwnedTerminalSession(e.sender.id, sessionId)
-    stopTerminalProcess(session)
-    terminalSessions.delete(sessionId)
+    getOwnedTerminalSession(e.sender.id, sessionId)
+    disposeTerminalSession(sessionId)
   })
 
   ipcMain.handle(IPC.TERMINAL_CLEAR_OUTPUT, async (e, sessionId: string) => {
-    getOwnedTerminalSession(e.sender.id, sessionId)
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    session.markerCarry = ''
     emitTerminalEvent(e.sender.id, {
       sessionId,
       type: 'session.cleared',
@@ -1114,7 +1236,22 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   ipcMain.handle(IPC.TERMINAL_KILL_COMMAND, async (e, sessionId: string) => {
     const session = getOwnedTerminalSession(e.sender.id, sessionId)
-    const stopped = stopTerminalProcess(session)
+    if (!session.ptyProcess) {
+      return { stopped: false }
+    }
+
+    session.ptyProcess.write('\u0003')
+    if (session.activeCommand) {
+      session.activeCommand = null
+      session.markerCarry = ''
+    }
+    emitTerminalEvent(session.senderId, {
+      sessionId,
+      type: 'command.cancelled',
+      ts: Date.now(),
+    })
+
+    const stopped = true
     return { stopped }
   })
 
@@ -1124,91 +1261,50 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     if (!normalizedCommand) {
       throw new Error('Command is required')
     }
-    if (session.activeProcess) {
+    if (!session.ptyProcess) {
+      throw new Error('Terminal session is not available')
+    }
+    if (session.activeCommand) {
       throw new Error('A command is already running in this terminal')
     }
 
-    const { spawn } = await import('child_process')
-    const isWindows = process.platform === 'win32'
-    const shellCommand = isWindows ? 'powershell.exe' : '/bin/bash'
-    const shellArgs = isWindows
-      ? ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', normalizedCommand]
-      : ['-lc', normalizedCommand]
-    const child = spawn(shellCommand, shellArgs, {
-      cwd: session.worktreePath,
-      windowsHide: true,
-      env: process.env,
-    })
+    const token = `__TC_DONE_${crypto.randomUUID().replace(/-/g, '')}__`
+    session.activeCommand = { command: normalizedCommand, token }
+    session.markerCarry = ''
+    const wrappedCommand = buildTerminalWrappedCommand(normalizedCommand, token)
 
-    session.activeProcess = child
     emitTerminalEvent(session.senderId, {
       sessionId,
       type: 'command.started',
       ts: Date.now(),
       command: normalizedCommand,
     })
-
-    const onOutput = (stream: 'stdout' | 'stderr', chunk: Buffer | string) => {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-      if (!text) return
-      emitTerminalEvent(session.senderId, {
-        sessionId,
-        type: 'command.output',
-        ts: Date.now(),
-        stream,
-        chunk: text,
-      })
-    }
-
-    child.stdout.on('data', (chunk) => onOutput('stdout', chunk))
-    child.stderr.on('data', (chunk) => onOutput('stderr', chunk))
-
-    child.once('error', (error) => {
-      if (session.activeProcess === child) {
-        session.activeProcess = null
-      }
-      emitTerminalEvent(session.senderId, {
-        sessionId,
-        type: 'command.failed',
-        ts: Date.now(),
-        message: error instanceof Error ? error.message : 'Terminal failed to start command',
-      })
-    })
-
-    child.once('close', (code, signal) => {
-      if (session.activeProcess === child) {
-        session.activeProcess = null
-      }
-
-      if (signal) {
-        emitTerminalEvent(session.senderId, {
-          sessionId,
-          type: 'command.cancelled',
-          ts: Date.now(),
-          exitCode: code,
-        })
-        return
-      }
-
-      if (code === 0) {
-        emitTerminalEvent(session.senderId, {
-          sessionId,
-          type: 'command.completed',
-          ts: Date.now(),
-          exitCode: code,
-        })
-        return
-      }
-
-      emitTerminalEvent(session.senderId, {
-        sessionId,
-        type: 'command.failed',
-        ts: Date.now(),
-        exitCode: code,
-      })
-    })
+    session.ptyProcess.write(`${wrappedCommand}\r`)
 
     return { started: true as const }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_WRITE_INPUT, async (e, sessionId: string, data: string) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    if (!session.ptyProcess) {
+      throw new Error('Terminal session is not available')
+    }
+
+    const normalizedData = typeof data === 'string' ? data : ''
+    session.ptyProcess.write(normalizedData)
+    return { written: true as const }
+  })
+
+  ipcMain.handle(IPC.TERMINAL_RESIZE, async (e, sessionId: string, cols: number, rows: number) => {
+    const session = getOwnedTerminalSession(e.sender.id, sessionId)
+    if (!session.ptyProcess) {
+      return { resized: false as const }
+    }
+
+    const normalizedCols = Number.isFinite(cols) ? Math.max(20, Math.floor(cols)) : 120
+    const normalizedRows = Number.isFinite(rows) ? Math.max(4, Math.floor(rows)) : 30
+    session.ptyProcess.resize(normalizedCols, normalizedRows)
+    return { resized: true as const }
   })
 
   // ── State persistence handlers ──

@@ -1030,10 +1030,35 @@
 
 .terminalDock {
   margin-top: var(--space-2);
-  border: 1px solid var(--border-muted);
+  border: 1px solid #1d1d1d;
   border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--bg-surface) 92%, #000 8%);
+  background: #000;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.terminalDockResizeHandle {
+  height: 9px;
+  cursor: ns-resize;
+  background: linear-gradient(to bottom, #101010, #050505);
+  border-bottom: 1px solid #171717;
+  touch-action: none;
+  position: relative;
+}
+
+.terminalDockResizeHandle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 52px;
+  height: 2px;
+  margin-left: -26px;
+  border-radius: 999px;
+  background: #2a2a2a;
 }
 
 .terminalDockHeader {
@@ -1041,12 +1066,12 @@
   align-items: center;
   gap: var(--space-2);
   padding: 6px var(--space-2);
-  border-bottom: 1px solid var(--border-muted);
-  background: color-mix(in srgb, var(--bg-surface-hover) 35%, transparent);
+  border-bottom: 1px solid #1d1d1d;
+  background: #050505;
 }
 
 .terminalDockTitle {
-  color: var(--text-secondary);
+  color: #e7e7e7;
   font-size: var(--font-size-xs);
   font-family: var(--font-mono);
   letter-spacing: 0.03em;
@@ -1054,7 +1079,7 @@
 }
 
 .terminalDockStatus {
-  color: var(--text-tertiary);
+  color: #9a9a9a;
   font-size: var(--font-size-xs);
 }
 
@@ -1066,18 +1091,19 @@
 }
 
 .terminalDockActionBtn {
-  background: transparent;
-  border: 1px solid var(--border-muted);
+  background: #0b0b0b;
+  border: 1px solid #232323;
   border-radius: var(--radius-sm);
-  color: var(--text-tertiary);
+  color: #a8a8a8;
   cursor: pointer;
   font-size: var(--font-size-xs);
   padding: 3px 7px;
 }
 
 .terminalDockActionBtn:hover:not(:disabled) {
-  color: var(--text-secondary);
-  border-color: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-muted));
+  color: #e3e3e3;
+  border-color: #343434;
+  background: #111;
 }
 
 .terminalDockActionBtn:disabled {
@@ -1086,64 +1112,28 @@
 }
 
 .terminalDockOutput {
-  margin: 0;
-  padding: var(--space-2);
-  min-height: 120px;
-  max-height: 220px;
-  overflow: auto;
-  background: color-mix(in srgb, var(--bg-panel) 86%, #000 14%);
-  color: color-mix(in srgb, var(--text-secondary) 88%, #fff 12%);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.terminalDockInputRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border-top: 1px solid var(--border-muted);
-}
-
-.terminalDockInput {
   flex: 1;
-  min-width: 0;
-  border: 1px solid var(--border-muted);
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  line-height: 1.3;
+  min-height: 0;
+  background: #000;
+}
+
+.terminalDockHost {
+  width: 100%;
+  height: 100%;
   padding: 6px 8px;
+  box-sizing: border-box;
 }
 
-.terminalDockInput:focus {
-  outline: none;
-  border-color: var(--accent-blue);
+.terminalDockHost :global(.xterm) {
+  height: 100%;
 }
 
-.terminalDockRunBtn {
-  background: var(--accent-blue);
-  border: none;
-  border-radius: var(--radius-sm);
-  color: #fff;
-  cursor: pointer;
-  font-size: var(--font-size-xs);
-  font-weight: var(--weight-semibold);
-  padding: 7px 10px;
+.terminalDockHost :global(.xterm-viewport) {
+  background: #000 !important;
 }
 
-.terminalDockRunBtn:hover:not(:disabled) {
-  background: var(--accent-blue-dim);
-}
-
-.terminalDockRunBtn:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+.terminalDockHost :global(.xterm-screen canvas) {
+  image-rendering: pixelated;
 }
 
 .inputField {
