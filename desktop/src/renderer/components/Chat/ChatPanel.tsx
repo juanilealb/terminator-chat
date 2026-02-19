@@ -994,7 +994,7 @@ function summarizeCommandForDisplay(command: string): string {
 
 interface ToolTimelineEntry {
   id: string
-  type: 'command' | 'tool'
+  type: 'command' | 'tool' | 'reasoning'
   title: string
   subtitle?: string
   timestamp: number
@@ -1005,7 +1005,14 @@ interface ToolTimelineEntry {
 }
 
 function isToolTimelineMessage(message: ChatMessage): boolean {
-  return message.type === 'command' || message.type === 'tool-call'
+  return message.type === 'command' || message.type === 'tool-call' || message.type === 'reasoning'
+}
+
+function summarizeReasoningForDisplay(reasoning: string): string {
+  const normalized = reasoning.replace(/\s+/g, ' ').trim()
+  if (!normalized) return 'Reasoning'
+  if (normalized.length > 140) return `${normalized.slice(0, 137)}...`
+  return normalized
 }
 
 function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
@@ -1064,10 +1071,25 @@ function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
     }
   }
 
+  if (message.type === 'reasoning') {
+    return {
+      id: message.id,
+      type: 'reasoning',
+      title: summarizeReasoningForDisplay(message.content),
+      timestamp: message.timestamp,
+      status: null,
+      details: [
+        { label: 'Reasoning', value: message.content },
+      ],
+    }
+  }
+
   return null
 }
 
-function formatToolTimelineDotClassName(status: unknown): string {
+function formatToolTimelineDotClassName(entry: ToolTimelineEntry): string {
+  if (entry.type === 'reasoning') return styles.toolTimelineDotNeutral
+  const { status } = entry
   if (status === 'completed') return styles.toolTimelineDotSuccess
   if (status === 'failed') return styles.toolTimelineDotFail
   return styles.toolTimelineDotRunning
@@ -1096,7 +1118,7 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
     <div className={`${styles.message} ${styles.messageAssistant}`}>
       <div className={styles.toolTimelineCard}>
         <div className={styles.toolTimelineHeader}>
-          <span className={styles.commandLabel}>Tool calls</span>
+          <span className={styles.commandLabel}>Activity</span>
           <span className={styles.toolTimelineCount}>{entries.length}</span>
         </div>
 
@@ -1114,12 +1136,14 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
           {visibleEntries.map((entry) => (
             <details key={entry.id} className={styles.toolTimelineItem}>
               <summary className={styles.toolTimelineItemSummary}>
-                <span className={`${styles.toolTimelineDot} ${formatToolTimelineDotClassName(entry.status)}`} />
+                <span className={`${styles.toolTimelineDot} ${formatToolTimelineDotClassName(entry)}`} />
                 <span className={styles.toolTimelineType}>{entry.type}</span>
                 <span className={styles.toolTimelineTitle}>{entry.title}</span>
-                <span className={`${styles.exitCode} ${formatStatusClassName(entry.status)}`}>
-                  {formatStatusLabel(entry.status)}
-                </span>
+                {entry.status != null && (
+                  <span className={`${styles.exitCode} ${formatStatusClassName(entry.status)}`}>
+                    {formatStatusLabel(entry.status)}
+                  </span>
+                )}
                 {typeof entry.exitCode === 'number' && (
                   <span className={`${styles.exitCode} ${entry.exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
                     exit {entry.exitCode}
@@ -1536,7 +1560,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const queuePreview = nextQueuedPrompt ? queuePreviewText(nextQueuedPrompt) : ''
   const queuedCount = queuedPrompts.length
   const additionalQueuedCount = Math.max(queuedCount - 1, 0)
-  const queueBarVisible = loading || waitingForInput || queuedCount > 0
+  const queueBarVisible = queuedCount > 0
   const queueStatusLabel = waitingForInput
     ? 'Waiting for input'
     : (loading || cancelInFlight)
@@ -3030,11 +3054,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           <div className={styles.queueBar}>
             <div className={styles.queueBarTextBlock}>
               <span className={styles.queueBarStatus}>{queueStatusLabel}</span>
-              {nextQueuedPrompt ? (
-                <span className={styles.queueBarText}>{queuePreview}</span>
-              ) : (
-                <span className={styles.queueBarHint}>Type a message and press send to queue it</span>
-              )}
+              {nextQueuedPrompt && <span className={styles.queueBarText}>{queuePreview}</span>}
             </div>
             <div className={styles.queueBarActions}>
               {additionalQueuedCount > 0 && (

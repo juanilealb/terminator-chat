@@ -41,17 +41,7 @@ export function mapChatEventToMessage(input: MapChatEventToMessageInput): ChatMe
         },
       }
     case 'turn.completed':
-      return {
-        id: scopedId,
-        role: 'system',
-        content: 'Turn completed',
-        type: 'text',
-        timestamp,
-        metadata: {
-          lifecycle: data.type,
-          usage: data.usage,
-        },
-      }
+      return null
     case 'turn.cancelled':
       return {
         id: scopedId,

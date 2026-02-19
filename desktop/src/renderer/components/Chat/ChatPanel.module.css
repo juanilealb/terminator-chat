@@ -443,8 +443,8 @@
 }
 
 .toolTimelineCard {
-  background: color-mix(in srgb, var(--bg-surface) 92%, #ffffff 8%);
-  border: 1px solid var(--border-muted);
+  background: color-mix(in srgb, var(--bg-surface) 62%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-muted) 62%, transparent);
   border-radius: var(--radius-lg);
   border-bottom-left-radius: var(--radius-sm);
   overflow: hidden;
@@ -456,8 +456,8 @@
   justify-content: space-between;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
-  background: color-mix(in srgb, var(--bg-surface-hover) 86%, #ffffff 14%);
-  border-bottom: 1px solid var(--border-muted);
+  background: color-mix(in srgb, var(--bg-surface-hover) 46%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-muted) 48%, transparent);
 }
 
 .toolTimelineCount {
@@ -472,7 +472,7 @@
 }
 
 .toolTimelineItem {
-  border-top: 1px solid var(--border-muted);
+  border-top: 1px solid color-mix(in srgb, var(--border-muted) 42%, transparent);
 }
 
 .toolTimelineItem:first-child {
@@ -494,7 +494,7 @@
 }
 
 .toolTimelineItemSummary:hover {
-  background: color-mix(in srgb, var(--bg-surface-hover) 88%, #ffffff 12%);
+  background: color-mix(in srgb, var(--bg-surface-hover) 54%, transparent);
 }
 
 .toolTimelineDot {
@@ -514,6 +514,10 @@
 
 .toolTimelineDotRunning {
   background: var(--accent-blue);
+}
+
+.toolTimelineDotNeutral {
+  background: color-mix(in srgb, var(--text-tertiary) 80%, transparent);
 }
 
 .toolTimelineType {
@@ -741,11 +745,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.queueBarHint {
-  color: var(--text-tertiary);
-  font-size: var(--font-size-xs);
 }
 
 .queueBarActions {
