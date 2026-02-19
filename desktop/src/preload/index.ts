@@ -82,6 +82,18 @@ const api = {
       ipcRenderer.invoke(IPC.GIT_GET_CURRENT_BRANCH, worktreePath) as Promise<string>,
     getDefaultBranch: (repoPath: string) =>
       ipcRenderer.invoke(IPC.GIT_GET_DEFAULT_BRANCH, repoPath) as Promise<string>,
+    fetchOrigin: (repoPath: string) =>
+      ipcRenderer.invoke(IPC.GIT_FETCH_ORIGIN, repoPath),
+    pullCurrentBranch: (worktreePath: string) =>
+      ipcRenderer.invoke(IPC.GIT_PULL_CURRENT_BRANCH, worktreePath) as Promise<{ branch: string }>,
+    getBranchSyncStatus: (worktreePath: string) =>
+      ipcRenderer.invoke(IPC.GIT_GET_BRANCH_SYNC_STATUS, worktreePath) as Promise<{
+        branch: string
+        upstream: string | null
+        ahead: number
+        behind: number
+        state: 'up-to-date' | 'ahead' | 'behind' | 'diverged' | 'no-upstream' | 'detached' | 'unknown'
+      }>,
     createSnapshot: (worktreePath: string, label?: string) =>
       ipcRenderer.invoke(IPC.GIT_CREATE_SNAPSHOT, worktreePath, label) as Promise<{
         ref: string

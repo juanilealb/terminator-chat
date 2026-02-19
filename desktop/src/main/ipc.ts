@@ -315,6 +315,24 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
     )
   })
 
+  ipcMain.handle(IPC.GIT_FETCH_ORIGIN, async (_e, repoPath: string) => {
+    return runGitOperation('fetch-origin', { repoPath }, () =>
+      GitService.fetchOrigin(repoPath),
+    )
+  })
+
+  ipcMain.handle(IPC.GIT_PULL_CURRENT_BRANCH, async (_e, worktreePath: string) => {
+    return runGitOperation('pull-current-branch', { worktreePath }, () =>
+      GitService.pullCurrentBranch(worktreePath),
+    )
+  })
+
+  ipcMain.handle(IPC.GIT_GET_BRANCH_SYNC_STATUS, async (_e, worktreePath: string) => {
+    return runGitOperation('get-branch-sync-status', { worktreePath }, () =>
+      GitService.getBranchSyncStatus(worktreePath),
+    )
+  })
+
   ipcMain.handle(IPC.GIT_CREATE_SNAPSHOT, async (_e, worktreePath: string, label?: string) => {
     return runGitOperation('create-snapshot', { worktreePath, label }, () =>
       GitService.createSnapshot(worktreePath, label),

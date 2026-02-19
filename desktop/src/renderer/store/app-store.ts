@@ -126,6 +126,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   prStatusMap: new Map(),
   ghAvailability: new Map(),
   ghErrorMap: new Map(),
+  workspaceSyncStatusById: {},
   chatMessages: {},
   codexLoggedIn: false,
   chatThread: null,
@@ -172,6 +173,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const fileWatcherWaitingIds = new Set(
         [...s._fileWatcherWaitingIds].filter((wsId) => !removedWsIds.has(wsId)),
       )
+      const workspaceSyncStatusById = Object.fromEntries(
+        Object.entries(s.workspaceSyncStatusById).filter(([workspaceId]) => !removedWsIds.has(workspaceId)),
+      )
       for (const wsId of removedWsIds) delete tabMap[wsId]
       return {
         projects: s.projects.filter((p) => p.id !== id),
@@ -183,6 +187,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         _chatThreadStatusById: chatThreadStatusById,
         _fileWatcherRunningIds: fileWatcherRunningIds,
         _fileWatcherWaitingIds: fileWatcherWaitingIds,
+        workspaceSyncStatusById,
         runningAgentCount: activeClaudeWorkspaceIds.size,
         waitingAgentCount: waitingClaudeWorkspaceIds.size,
         lastActiveTabByWorkspace: tabMap,
@@ -214,6 +219,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const chatThreadStatusById = Object.fromEntries(
         Object.entries(s._chatThreadStatusById).filter(([, value]) => value.workspaceId !== id),
       )
+      const workspaceSyncStatusById = { ...s.workspaceSyncStatusById }
+      delete workspaceSyncStatusById[id]
       const tabMap = { ...s.lastActiveTabByWorkspace }
       delete tabMap[id]
       return {
@@ -226,6 +233,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         _chatThreadStatusById: chatThreadStatusById,
         _fileWatcherRunningIds: newFileWatcherRunning,
         _fileWatcherWaitingIds: newFileWatcherWaiting,
+        workspaceSyncStatusById,
         runningAgentCount: newActiveClaude.size,
         waitingAgentCount: newWaitingClaude.size,
         lastActiveTabByWorkspace: tabMap,
@@ -1166,6 +1174,90 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { ghAvailability: newAvail, ghErrorMap: newErrors }
     }),
 
+  setWorkspaceSyncStatus: (workspaceId, status) =>
+    set((s) => ({
+      workspaceSyncStatusById: {
+        ...s.workspaceSyncStatusById,
+        [workspaceId]: status,
+      },
+    })),
+
+  syncActiveWorkspace: async () => {
+    const s = get()
+    const workspace = s.workspaces.find((entry) => entry.id === s.activeWorkspaceId)
+    if (!workspace) {
+      get().addToast({ id: crypto.randomUUID(), message: 'Select a workspace first', type: 'info' })
+      return
+    }
+
+    try {
+      const pulled = await window.api.git.pullCurrentBranch(workspace.worktreePath)
+      const syncStatus = await window.api.git.getBranchSyncStatus(workspace.worktreePath).catch(() => null)
+      if (syncStatus) {
+        get().setWorkspaceSyncStatus(workspace.id, {
+          ...syncStatus,
+          checkedAt: Date.now(),
+        })
+      }
+      get().addToast({
+        id: crypto.randomUUID(),
+        message: `Synced ${pulled.branch}.`,
+        type: 'info',
+      })
+      window.dispatchEvent(new Event('terminator:pr-poll-hint'))
+    } catch (err) {
+      const msg = formatUserError(err, 'Failed to sync current workspace')
+      get().addToast({ id: crypto.randomUUID(), message: msg, type: 'error' })
+    }
+  },
+
+  fetchAllProjects: async () => {
+    const s = get()
+    if (s.projects.length === 0) {
+      get().addToast({ id: crypto.randomUUID(), message: 'No projects to sync', type: 'info' })
+      return
+    }
+
+    const fetches = await Promise.allSettled(
+      s.projects.map(async (project) => {
+        await window.api.git.fetchOrigin(project.repoPath)
+        return project.id
+      }),
+    )
+
+    const succeeded = fetches.filter((entry) => entry.status === 'fulfilled').length
+    const failedEntries = fetches.filter((entry): entry is PromiseRejectedResult => entry.status === 'rejected')
+
+    const latest = get()
+    await Promise.allSettled(
+      latest.workspaces.map(async (workspace) => {
+        const syncStatus = await window.api.git.getBranchSyncStatus(workspace.worktreePath)
+        latest.setWorkspaceSyncStatus(workspace.id, {
+          ...syncStatus,
+          checkedAt: Date.now(),
+        })
+      }),
+    )
+
+    if (failedEntries.length === 0) {
+      get().addToast({
+        id: crypto.randomUUID(),
+        message: `Fetched origin for ${succeeded} project${succeeded === 1 ? '' : 's'}.`,
+        type: 'success',
+      })
+      window.dispatchEvent(new Event('terminator:pr-poll-hint'))
+      return
+    }
+
+    const firstError = formatUserError(failedEntries[0].reason, 'Failed to fetch one or more projects')
+    get().addToast({
+      id: crypto.randomUUID(),
+      message: `Fetched ${succeeded}/${s.projects.length} projects. ${firstError}`,
+      type: 'error',
+    })
+    window.dispatchEvent(new Event('terminator:pr-poll-hint'))
+  },
+
   openDiffTab: (workspaceId) => {
     const s = get()
     const existing = s.tabs.find(
@@ -1212,6 +1304,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeTabId,
       lastActiveTabByWorkspace: data.lastActiveTabByWorkspace ?? {},
       lastSelectedBranchByProject,
+      workspaceSyncStatusById: {},
       newThreadDialog: {
         open: false,
         projectId: persistedDialog.projectId ?? null,

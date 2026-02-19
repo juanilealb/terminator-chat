@@ -31,18 +31,32 @@ export function usePrStatusPoller(): void {
     const nextIntervalMs = () => (inBurst() ? FAST_POLL_INTERVAL : NORMAL_POLL_INTERVAL)
 
     async function pollAll(): Promise<{ hasPendingChecks: boolean }> {
-      const { projects, workspaces, setPrStatuses, setGhAvailability, updateWorkspaceBranch } =
+      const {
+        projects,
+        workspaces,
+        setPrStatuses,
+        setGhAvailability,
+        updateWorkspaceBranch,
+        setWorkspaceSyncStatus,
+      } =
         useAppStore.getState()
 
-      // Refresh actual branch names from git before querying PRs
+      // Refresh actual branch names and sync status from git before querying PRs.
       await Promise.allSettled(
         workspaces.map(async (ws) => {
           if (!ws.worktreePath) return
           try {
-            const actual = await window.api.git.getCurrentBranch(ws.worktreePath)
+            const [actual, syncStatus] = await Promise.all([
+              window.api.git.getCurrentBranch(ws.worktreePath),
+              window.api.git.getBranchSyncStatus(ws.worktreePath),
+            ])
             if (actual && actual !== ws.branch) {
               updateWorkspaceBranch(ws.id, actual)
             }
+            setWorkspaceSyncStatus(ws.id, {
+              ...syncStatus,
+              checkedAt: Date.now(),
+            })
           } catch {
             // Worktree may have been removed — ignore
           }

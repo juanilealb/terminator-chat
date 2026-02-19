@@ -41,6 +41,8 @@ export function CommandPalette() {
     toggleSidebar,
     openNewThreadDialog,
     focusOrCreateChat,
+    syncActiveWorkspace,
+    fetchAllProjects,
     toggleSettings,
     toggleQuickOpen,
     addToast,
@@ -141,9 +143,27 @@ export function CommandPalette() {
         shortcut: '/memory',
         run: () => ensureRightPanelMode('memory'),
       },
+      {
+        id: 'fetch-all-projects',
+        title: 'Fetch all projects',
+        description: 'Fetch origin refs for every project',
+        keywords: ['fetch', 'sync', '/fetch'],
+        category: 'Git',
+        shortcut: '/fetch',
+        run: async () => fetchAllProjects(),
+      },
     ]
 
     if (workspace) {
+      actions.push({
+        id: 'sync-current-workspace',
+        title: 'Sync current branch',
+        description: 'Fast-forward pull on the active workspace branch',
+        keywords: ['pull', 'sync', '/sync'],
+        category: 'Git',
+        shortcut: '/sync',
+        run: async () => syncActiveWorkspace(),
+      })
       actions.push({
         id: 'snapshot-create',
         title: 'Create snapshot',
@@ -212,6 +232,8 @@ export function CommandPalette() {
     toggleQuickOpen,
     toggleSettings,
     toggleSidebar,
+    syncActiveWorkspace,
+    fetchAllProjects,
     addToast,
     rightPanelOpen,
     refreshWorkspaceStatusCount,
@@ -254,6 +276,14 @@ export function CommandPalette() {
     }
     if (command === 'memory') {
       ensureRightPanelMode('memory')
+      return true
+    }
+    if (command === 'fetch') {
+      await fetchAllProjects()
+      return true
+    }
+    if (command === 'sync' || command === 'pull') {
+      await syncActiveWorkspace()
       return true
     }
     if (command === 'snapshot') {
@@ -309,7 +339,7 @@ export function CommandPalette() {
     if (command === 'help') {
       addToast({
         id: crypto.randomUUID(),
-        message: 'Slash commands: /chat /files /changes /memory /snapshot /restore-latest /template',
+        message: 'Slash commands: /chat /files /changes /memory /fetch /sync /snapshot /restore-latest /template',
         type: 'info',
       })
       return true

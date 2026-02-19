@@ -48,6 +48,24 @@ export interface Workspace {
   memory?: string
 }
 
+export type WorkspaceSyncState =
+  | 'up-to-date'
+  | 'ahead'
+  | 'behind'
+  | 'diverged'
+  | 'no-upstream'
+  | 'detached'
+  | 'unknown'
+
+export interface WorkspaceSyncStatus {
+  state: WorkspaceSyncState
+  branch: string
+  upstream: string | null
+  ahead: number
+  behind: number
+  checkedAt: number
+}
+
 export {
   DEFAULT_AGENT_PERMISSION_MODE,
   parseAgentPermissionMode,
@@ -186,6 +204,7 @@ export interface AppState {
   prStatusMap: Map<string, PrInfo | null>
   ghAvailability: Map<string, boolean>
   ghErrorMap: Map<string, GithubLookupError | undefined>
+  workspaceSyncStatusById: Record<string, WorkspaceSyncStatus | undefined>
   chatMessages: Record<string, ChatMessage[]>
   codexLoggedIn: boolean
   chatThread: ChatThread | null
@@ -270,6 +289,9 @@ export interface AppState {
   // PR status actions
   setPrStatuses: (projectId: string, statuses: Record<string, PrInfo | null>) => void
   setGhAvailability: (projectId: string, available: boolean, error?: GithubLookupError) => void
+  setWorkspaceSyncStatus: (workspaceId: string, status: WorkspaceSyncStatus) => void
+  syncActiveWorkspace: () => Promise<void>
+  fetchAllProjects: () => Promise<void>
 
   // Hydration
   hydrateState: (data: PersistedState) => void

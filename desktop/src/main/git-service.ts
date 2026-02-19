@@ -37,6 +37,23 @@ export interface PushBranchResult {
   branch: string
 }
 
+export type BranchSyncState =
+  | 'up-to-date'
+  | 'ahead'
+  | 'behind'
+  | 'diverged'
+  | 'no-upstream'
+  | 'detached'
+  | 'unknown'
+
+export interface BranchSyncStatus {
+  branch: string
+  upstream: string | null
+  ahead: number
+  behind: number
+  state: BranchSyncState
+}
+
 export interface PullRequestResult {
   url: string
   created: boolean
@@ -802,6 +819,113 @@ export class GitService {
       return await git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)
     } catch {
       return ''
+    }
+  }
+
+  static async fetchOrigin(repoPath: string): Promise<void> {
+    const hasOrigin = await GitService.hasRemote(repoPath, 'origin')
+    if (!hasOrigin) {
+      throw new Error('No origin remote found')
+    }
+    try {
+      await git(['fetch', '--prune', 'origin'], repoPath)
+    } catch (err) {
+      throw new Error(friendlyGitError(err, 'Failed to fetch origin'))
+    }
+  }
+
+  static async pullCurrentBranch(worktreePath: string): Promise<PushBranchResult> {
+    const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath).catch(() => '')
+    if (!branch || branch === 'HEAD') {
+      throw new Error('Cannot sync detached HEAD')
+    }
+
+    const dirty = await git(['status', '--porcelain=v1', '-uall'], worktreePath).catch(() => '')
+    if (dirty.trim()) {
+      throw new Error('Workspace has local changes. Commit, stash, or discard before sync.')
+    }
+
+    try {
+      await git(['pull', '--ff-only'], worktreePath)
+    } catch (err) {
+      throw new Error(friendlyGitError(err, 'Failed to sync current branch'))
+    }
+    return { branch }
+  }
+
+  static async getBranchSyncStatus(worktreePath: string): Promise<BranchSyncStatus> {
+    const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath).catch(() => '')
+    if (!branch) {
+      return {
+        branch: '',
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        state: 'unknown',
+      }
+    }
+    if (branch === 'HEAD') {
+      return {
+        branch,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        state: 'detached',
+      }
+    }
+
+    let upstream = await git(
+      ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+      worktreePath
+    ).catch(() => '')
+
+    if (!upstream) {
+      const fallbackUpstream = `origin/${branch}`
+      const hasFallbackUpstream = await git(
+        ['rev-parse', '--verify', `refs/remotes/${fallbackUpstream}`],
+        worktreePath,
+      ).then(() => true, () => false)
+
+      if (!hasFallbackUpstream) {
+        return {
+          branch,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          state: 'no-upstream',
+        }
+      }
+      upstream = fallbackUpstream
+    }
+
+    try {
+      const output = await git(['rev-list', '--left-right', '--count', `${upstream}...HEAD`], worktreePath)
+      const [behindRaw = '0', aheadRaw = '0'] = output.trim().split(/\s+/)
+      const behind = Number.parseInt(behindRaw, 10) || 0
+      const ahead = Number.parseInt(aheadRaw, 10) || 0
+      const state: BranchSyncState = ahead > 0 && behind > 0
+        ? 'diverged'
+        : ahead > 0
+          ? 'ahead'
+          : behind > 0
+            ? 'behind'
+            : 'up-to-date'
+
+      return {
+        branch,
+        upstream,
+        ahead,
+        behind,
+        state,
+      }
+    } catch {
+      return {
+        branch,
+        upstream,
+        ahead: 0,
+        behind: 0,
+        state: 'unknown',
+      }
     }
   }
 

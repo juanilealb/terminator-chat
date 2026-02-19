@@ -419,6 +419,18 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     })
   }, [worktreePath, runGitOp, addToast])
 
+  const handleSyncBranch = useCallback(() => {
+    void runGitOp(async () => {
+      const pulled = await window.api.git.pullCurrentBranch(worktreePath)
+      addToast({
+        id: crypto.randomUUID(),
+        message: `Synced ${pulled.branch}.`,
+        type: 'info',
+      })
+      window.dispatchEvent(new Event('terminator:pr-poll-hint'))
+    })
+  }, [worktreePath, runGitOp, addToast])
+
   const handleOpenOrCreatePr = useCallback((pushFirst: boolean) => {
     void runGitOp(async () => {
       let pushedBranch: string | null = null
@@ -513,6 +525,15 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
             title={`Push current branch (${branchDisplayName}) to origin`}
           >
             Push to origin
+          </Button>
+          <Button
+            appearance="secondary"
+            size="small"
+            disabled={busy}
+            onClick={handleSyncBranch}
+            title={`Fast-forward pull ${branchDisplayName} from origin`}
+          >
+            Sync branch
           </Button>
           <Button
             appearance="secondary"

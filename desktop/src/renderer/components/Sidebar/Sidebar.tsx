@@ -5,7 +5,15 @@ import { formatRelativeTime } from "../../utils/relative-time";
 import { SHORTCUT_MAP } from "@shared/shortcuts";
 import { DEFAULT_AGENT_PERMISSION_MODE } from "@shared/agent-permissions";
 import { useAppStore } from "../../store/app-store";
-import { DEFAULT_WORKSPACE_TYPE, type ChatMessage, type Project, type PrLinkProvider, type Tab, type WorkspaceType } from "../../store/types";
+import {
+  DEFAULT_WORKSPACE_TYPE,
+  type ChatMessage,
+  type Project,
+  type PrLinkProvider,
+  type Tab,
+  type WorkspaceSyncStatus,
+  type WorkspaceType,
+} from "../../store/types";
 import type { CreateWorktreeProgressEvent } from "../../../shared/workspace-creation";
 import type { OpenPrInfo, GithubLookupError } from "../../../shared/github-types";
 import { WorkspaceDialog } from "./WorkspaceDialog";
@@ -122,6 +130,53 @@ function normalizeBranchName(input: string): string {
 function toUserErrorMessage(err: unknown, fallback: string): string {
   if (!(err instanceof Error)) return fallback;
   return err.message || fallback;
+}
+
+function toSyncBadge(
+  syncStatus: WorkspaceSyncStatus | undefined,
+): { label: string; className: string; title: string } | null {
+  if (!syncStatus || syncStatus.state === "up-to-date") return null;
+
+  if (syncStatus.state === "behind") {
+    return {
+      label: `v${Math.max(1, syncStatus.behind)}`,
+      className: styles.syncBehind,
+      title: `Behind ${syncStatus.behind} commit${syncStatus.behind === 1 ? "" : "s"} from ${syncStatus.upstream ?? "remote"}`,
+    };
+  }
+  if (syncStatus.state === "ahead") {
+    return {
+      label: `^${Math.max(1, syncStatus.ahead)}`,
+      className: styles.syncAhead,
+      title: `Ahead ${syncStatus.ahead} commit${syncStatus.ahead === 1 ? "" : "s"} to push`,
+    };
+  }
+  if (syncStatus.state === "diverged") {
+    return {
+      label: `<>${syncStatus.ahead}/${syncStatus.behind}`,
+      className: styles.syncDiverged,
+      title: `Branch diverged: ahead ${syncStatus.ahead}, behind ${syncStatus.behind}`,
+    };
+  }
+  if (syncStatus.state === "no-upstream") {
+    return {
+      label: "no up",
+      className: styles.syncNoUpstream,
+      title: "No upstream tracking branch configured",
+    };
+  }
+  if (syncStatus.state === "detached") {
+    return {
+      label: "HEAD",
+      className: styles.syncDetached,
+      title: "Detached HEAD",
+    };
+  }
+  return {
+    label: "sync?",
+    className: styles.syncUnknown,
+    title: "Sync status unavailable",
+  };
 }
 
 function getThreadDisplayName(
@@ -457,6 +512,7 @@ export function Sidebar() {
   const waitingClaudeWorkspaceIds = useAppStore((s) => s.waitingClaudeWorkspaceIds);
   const chatThreadStatusById = useAppStore((s) => s._chatThreadStatusById);
   const completedClaudeWorkspaceIds = useAppStore((s) => s.completedClaudeWorkspaceIds);
+  const workspaceSyncStatusById = useAppStore((s) => s.workspaceSyncStatusById);
   const renameWorkspace = useAppStore((s) => s.renameWorkspace);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const setPrStatuses = useAppStore((s) => s.setPrStatuses);
@@ -1283,6 +1339,7 @@ export function Sidebar() {
                       || (!threadStatus && tab.id === activeTabId && !isRunning && workspaceWaiting);
                     const isCompleted = !isRunning && !isWaiting && completedClaudeWorkspaceIds.has(workspace.id);
                     const isUnread = !isRunning && !isWaiting && !isCompleted && unreadWorkspaceIds.has(workspace.id);
+                    const syncBadge = toSyncBadge(workspaceSyncStatusById[workspace.id]);
 
                     return (
                       <div
@@ -1298,6 +1355,14 @@ export function Sidebar() {
                         <span className={styles.threadName}>{displayName}</span>
                         {latestTs > 0 && (
                           <span className={styles.threadTime}>{formatRelativeTime(latestTs, now)}</span>
+                        )}
+                        {syncBadge && (
+                          <span
+                            className={`${styles.workspaceSyncBadge} ${syncBadge.className}`}
+                            title={syncBadge.title}
+                          >
+                            {syncBadge.label}
+                          </span>
                         )}
                         <Tooltip label="Delete thread branch">
                           <button
