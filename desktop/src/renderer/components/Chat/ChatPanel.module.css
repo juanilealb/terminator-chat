@@ -443,8 +443,8 @@
 }
 
 .toolTimelineCard {
-  background: color-mix(in srgb, var(--bg-surface) 62%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border-muted) 62%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-muted) 18%, transparent);
   border-radius: var(--radius-lg);
   border-bottom-left-radius: var(--radius-sm);
   overflow: hidden;
@@ -453,26 +453,34 @@
 .toolTimelineHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: color-mix(in srgb, var(--bg-surface-hover) 46%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--border-muted) 48%, transparent);
+  padding: 7px var(--space-3);
+  background: color-mix(in srgb, var(--bg-surface-hover) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-muted) 14%, transparent);
+}
+
+.toolTimelineLabel {
+  color: color-mix(in srgb, var(--text-tertiary) 78%, transparent);
+  letter-spacing: 0.05em;
+  opacity: 0.66;
 }
 
 .toolTimelineCount {
-  color: var(--text-tertiary);
+  color: color-mix(in srgb, var(--text-tertiary) 82%, transparent);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
+  opacity: 0.74;
 }
 
 .toolTimelineList {
   display: flex;
   flex-direction: column;
+  padding: 1px 0;
 }
 
 .toolTimelineItem {
-  border-top: 1px solid color-mix(in srgb, var(--border-muted) 42%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-muted) 14%, transparent);
 }
 
 .toolTimelineItem:first-child {
@@ -485,8 +493,10 @@
   display: flex;
   gap: var(--space-2);
   list-style: none;
-  padding: 6px var(--space-3);
+  padding: 5px var(--space-3);
   user-select: none;
+  opacity: 0.7;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
 }
 
 .toolTimelineItemSummary::-webkit-details-marker {
@@ -494,34 +504,36 @@
 }
 
 .toolTimelineItemSummary:hover {
-  background: color-mix(in srgb, var(--bg-surface-hover) 54%, transparent);
+  background: color-mix(in srgb, var(--bg-surface-hover) 12%, transparent);
+  opacity: 0.88;
 }
 
 .toolTimelineDot {
   border-radius: 50%;
-  height: 8px;
-  width: 8px;
+  height: 6px;
+  width: 6px;
   flex-shrink: 0;
+  opacity: 0.72;
 }
 
 .toolTimelineDotSuccess {
-  background: var(--accent-green);
+  background: color-mix(in srgb, var(--accent-green) 42%, var(--text-tertiary) 58%);
 }
 
 .toolTimelineDotFail {
-  background: var(--accent-red);
+  background: color-mix(in srgb, var(--accent-red) 42%, var(--text-tertiary) 58%);
 }
 
 .toolTimelineDotRunning {
-  background: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 42%, var(--text-tertiary) 58%);
 }
 
 .toolTimelineDotNeutral {
-  background: color-mix(in srgb, var(--text-tertiary) 80%, transparent);
+  background: color-mix(in srgb, var(--text-tertiary) 44%, transparent);
 }
 
 .toolTimelineType {
-  color: var(--text-tertiary);
+  color: color-mix(in srgb, var(--text-tertiary) 58%, transparent);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   flex-shrink: 0;
@@ -529,7 +541,7 @@
 }
 
 .toolTimelineTitle {
-  color: var(--text-primary);
+  color: color-mix(in srgb, var(--text-secondary) 76%, var(--text-tertiary) 24%);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
   min-width: 0;
@@ -538,27 +550,36 @@
   white-space: nowrap;
 }
 
+.toolTimelineMeta {
+  color: color-mix(in srgb, var(--text-tertiary) 72%, transparent);
+  opacity: 0.56;
+  font-weight: var(--weight-regular);
+}
+
 .toolTimelineSubtitle {
-  color: var(--text-secondary);
+  color: color-mix(in srgb, var(--text-tertiary) 78%, transparent);
   font-size: var(--font-size-xs);
   padding: 0 var(--space-3) var(--space-2);
+  opacity: 0.66;
 }
 
 .toolTimelineToggle {
   background: transparent;
   border: none;
-  color: var(--text-tertiary);
+  color: color-mix(in srgb, var(--text-tertiary) 72%, transparent);
   cursor: pointer;
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   padding: 6px var(--space-3);
   text-align: left;
-  transition: background var(--transition-fast), color var(--transition-fast);
+  transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+  opacity: 0.68;
 }
 
 .toolTimelineToggle:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-surface-hover) 10%, transparent);
+  color: color-mix(in srgb, var(--text-secondary) 74%, transparent);
+  opacity: 0.84;
 }
 
 .lifecycleCard {

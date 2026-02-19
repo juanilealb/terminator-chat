@@ -1008,8 +1008,20 @@ function isToolTimelineMessage(message: ChatMessage): boolean {
   return message.type === 'command' || message.type === 'tool-call' || message.type === 'reasoning'
 }
 
+function stripMarkdownForPreview(text: string): string {
+  return text
+    .replace(/```(?:[\w-]+)?\n?/g, '')
+    .replace(/```/g, '')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/__/g, '')
+}
+
 function summarizeReasoningForDisplay(reasoning: string): string {
-  const normalized = reasoning.replace(/\s+/g, ' ').trim()
+  const normalized = stripMarkdownForPreview(reasoning).replace(/\s+/g, ' ').trim()
   if (!normalized) return 'Reasoning'
   if (normalized.length > 140) return `${normalized.slice(0, 137)}...`
   return normalized
@@ -1106,6 +1118,10 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
 
   if (entries.length === 0) return null
 
+  const toolCallsCount = entries.filter((entry) => entry.type !== 'reasoning').length
+  const activityLabel = toolCallsCount > 0
+    ? `Tool calls (${toolCallsCount})`
+    : `Activity (${entries.length})`
   const hiddenCount = showAll || entries.length <= TOOL_TIMELINE_PREVIEW_LIMIT
     ? 0
     : entries.length - TOOL_TIMELINE_PREVIEW_LIMIT
@@ -1118,8 +1134,7 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
     <div className={`${styles.message} ${styles.messageAssistant}`}>
       <div className={styles.toolTimelineCard}>
         <div className={styles.toolTimelineHeader}>
-          <span className={styles.commandLabel}>Activity</span>
-          <span className={styles.toolTimelineCount}>{entries.length}</span>
+          <span className={`${styles.commandLabel} ${styles.toolTimelineLabel}`}>{activityLabel}</span>
         </div>
 
         {hiddenCount > 0 && (
@@ -1140,12 +1155,12 @@ function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
                 <span className={styles.toolTimelineType}>{entry.type}</span>
                 <span className={styles.toolTimelineTitle}>{entry.title}</span>
                 {entry.status != null && (
-                  <span className={`${styles.exitCode} ${formatStatusClassName(entry.status)}`}>
+                  <span className={`${styles.exitCode} ${styles.toolTimelineMeta} ${formatStatusClassName(entry.status)}`}>
                     {formatStatusLabel(entry.status)}
                   </span>
                 )}
                 {typeof entry.exitCode === 'number' && (
-                  <span className={`${styles.exitCode} ${entry.exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
+                  <span className={`${styles.exitCode} ${styles.toolTimelineMeta} ${entry.exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
                     exit {entry.exitCode}
                   </span>
                 )}
