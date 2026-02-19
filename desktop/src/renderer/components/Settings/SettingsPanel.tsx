@@ -321,17 +321,27 @@ export function SettingsPanel() {
     setGithubAccountsLoading(true)
     setGithubAccountsError(null)
     try {
-      const result = await window.api.github.listAuthAccounts('github.com') as GithubAuthAccountsResult
-      if (!result.available) {
+      const [dotComResult, personalHostResult] = await Promise.all([
+        window.api.github.listAuthAccounts('github.com') as Promise<GithubAuthAccountsResult>,
+        window.api.github.listAuthAccounts('github-personal') as Promise<GithubAuthAccountsResult>,
+      ])
+      const mergedAccounts = Array.from(
+        new Set([
+          ...(dotComResult.available ? dotComResult.data : []),
+          ...(personalHostResult.available ? personalHostResult.data : []),
+        ]),
+      )
+
+      if (mergedAccounts.length === 0) {
         setGithubAccounts([])
         setGithubAccountsError(
-          result.error === 'gh_not_installed'
-            ? 'GitHub CLI no está instalado.'
+          dotComResult.error === 'gh_not_installed' || personalHostResult.error === 'gh_not_installed'
+            ? 'GitHub CLI no esta instalado.'
             : 'No hay cuentas autenticadas en gh.',
         )
         return
       }
-      setGithubAccounts(result.data)
+      setGithubAccounts(mergedAccounts)
     } catch {
       setGithubAccounts([])
       setGithubAccountsError('No se pudieron cargar las cuentas de gh.')
@@ -527,50 +537,68 @@ export function SettingsPanel() {
                 label="Personal account login"
                 description="Cuenta usada para proyectos Personal."
               >
-                <Dropdown
-                  className={styles.dropdown}
-                  value={settings.githubPersonalLogin || 'No definida'}
-                  selectedOptions={[settings.githubPersonalLogin || '__none__']}
-                  onOptionSelect={(_, data) =>
-                    update(
-                      'githubPersonalLogin',
-                      data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
-                    )
-                  }
-                  size="small"
-                >
-                  <Option value="__none__">No definida</Option>
-                  {githubAccountOptions.map((account) => (
-                    <Option key={`personal-${account}`} value={account}>
-                      {account}
-                    </Option>
-                  ))}
-                </Dropdown>
+                <div className={styles.accountControlStack}>
+                  <Input
+                    className={styles.textInput}
+                    value={settings.githubPersonalLogin}
+                    onChange={(_, data) => update('githubPersonalLogin', data.value)}
+                    placeholder="juanilealb"
+                    size="small"
+                  />
+                  <Dropdown
+                    className={styles.dropdown}
+                    value={settings.githubPersonalLogin || 'Pick detected'}
+                    selectedOptions={[settings.githubPersonalLogin || '__none__']}
+                    onOptionSelect={(_, data) =>
+                      update(
+                        'githubPersonalLogin',
+                        data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
+                      )
+                    }
+                    size="small"
+                  >
+                    <Option value="__none__">Clear</Option>
+                    {githubAccountOptions.map((account) => (
+                      <Option key={`personal-${account}`} value={account}>
+                        {account}
+                      </Option>
+                    ))}
+                  </Dropdown>
+                </div>
               </SettingRow>
 
               <SettingRow
                 label="Work account login"
                 description="Cuenta usada para proyectos Laburo."
               >
-                <Dropdown
-                  className={styles.dropdown}
-                  value={settings.githubWorkLogin || 'No definida'}
-                  selectedOptions={[settings.githubWorkLogin || '__none__']}
-                  onOptionSelect={(_, data) =>
-                    update(
-                      'githubWorkLogin',
-                      data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
-                    )
-                  }
-                  size="small"
-                >
-                  <Option value="__none__">No definida</Option>
-                  {githubAccountOptions.map((account) => (
-                    <Option key={`work-${account}`} value={account}>
-                      {account}
-                    </Option>
-                  ))}
-                </Dropdown>
+                <div className={styles.accountControlStack}>
+                  <Input
+                    className={styles.textInput}
+                    value={settings.githubWorkLogin}
+                    onChange={(_, data) => update('githubWorkLogin', data.value)}
+                    placeholder="jleal-quintana"
+                    size="small"
+                  />
+                  <Dropdown
+                    className={styles.dropdown}
+                    value={settings.githubWorkLogin || 'Pick detected'}
+                    selectedOptions={[settings.githubWorkLogin || '__none__']}
+                    onOptionSelect={(_, data) =>
+                      update(
+                        'githubWorkLogin',
+                        data.optionValue === '__none__' ? '' : String(data.optionValue ?? ''),
+                      )
+                    }
+                    size="small"
+                  >
+                    <Option value="__none__">Clear</Option>
+                    {githubAccountOptions.map((account) => (
+                      <Option key={`work-${account}`} value={account}>
+                        {account}
+                      </Option>
+                    ))}
+                  </Dropdown>
+                </div>
               </SettingRow>
 
               <SettingRow
@@ -662,3 +690,4 @@ export function SettingsPanel() {
     </div>
   )
 }
+

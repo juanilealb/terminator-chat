@@ -127,6 +127,13 @@
   width: 200px;
 }
 
+.accountControlStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
 /* Danger button (uninstall hooks) */
 .dangerBtn {
   color: var(--accent-red, #f7768e) !important;

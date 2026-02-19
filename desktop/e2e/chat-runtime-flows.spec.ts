@@ -83,8 +83,8 @@ async function installMockChatBackend(app: ElectronApplication): Promise<void> {
     ipcMain.handle(IPC.CHAT_LOGOUT, async () => undefined)
     ipcMain.handle(IPC.CHAT_AUTH_STATUS, async () => ({ loggedIn: true }))
     ipcMain.handle(IPC.CHAT_LIST_MODELS, async () => [
-      { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-      { value: 'gpt-5.3-spark', label: 'GPT-5.3 Spark' },
+      { value: 'gpt-5.3-codex', label: 'gpt-5.3-codex' },
+      { value: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark' },
     ])
 
     ipcMain.handle(IPC.CHAT_CREATE_THREAD, async () => {
@@ -334,6 +334,32 @@ test.describe('Chat runtime flows', () => {
 
       await expect(window.locator('text=Request cancelled')).toBeVisible({ timeout: 10000 })
       await expect(window.locator('text=Done: quick after stop')).toBeVisible({ timeout: 12000 })
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('opening settings does not stop an in-flight turn', async () => {
+    const { app, window } = await launchApp()
+
+    try {
+      await installMockChatBackend(app)
+      await setupChatWorkspace(window, 'settings-inflight')
+
+      const input = window.locator('textarea[placeholder="Ask the agent..."]').first()
+      await expect(input).toBeVisible({ timeout: 20000 })
+
+      await input.fill('long task while settings open')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+      await expect(window.locator('[aria-label="Thinking"]')).toBeVisible({ timeout: 10000 })
+
+      await window.keyboard.press('Control+,')
+      await expect(window.locator('button[aria-label="Back to workspace"]')).toBeVisible({ timeout: 5000 })
+
+      await window.waitForTimeout(4200)
+
+      await window.locator('button[aria-label="Back to workspace"]').click()
+      await expect(window.locator('text=Done: long task while settings open')).toBeVisible({ timeout: 12000 })
     } finally {
       await app.close()
     }

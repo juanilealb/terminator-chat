@@ -1,2 +1,6 @@
 node_modules/
 pnpm-lock.yaml
+.summarize/
+.tmp/
+desktop/dist/
+desktop/out/

@@ -121,6 +121,14 @@
   min-height: 0;
   display: flex;
   overflow: hidden;
+  position: relative;
+}
+
+.settingsOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--bg-panel) 90%, transparent);
 }
 
 .centerPanel {

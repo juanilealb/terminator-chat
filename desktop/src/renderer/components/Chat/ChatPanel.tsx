@@ -584,7 +584,15 @@ function parseInteractiveQuestionText(content: string): ParsedInteractiveQuestio
 }
 
 function mergeModelOptionsWithRequired(options: DropdownOption[]): DropdownOption[] {
-  const merged = [...options]
+  const merged = options.map((option) => {
+    if (option.value === SPARK_MODEL_OPTION.value) {
+      return {
+        ...option,
+        label: SPARK_MODEL_OPTION.label,
+      }
+    }
+    return option
+  })
   if (!merged.some((option) => option.value === SPARK_MODEL_OPTION.value)) {
     merged.push(SPARK_MODEL_OPTION)
   }
