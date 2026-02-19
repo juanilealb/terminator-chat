@@ -9,7 +9,7 @@ import {
   systemPreferences,
   type BrowserWindowConstructorOptions,
 } from 'electron'
-import { statSync } from 'fs'
+import { existsSync, statSync } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
 import { arch, platform, release, tmpdir, version as osVersion } from 'os'
 import { IPC } from '../shared/ipc-channels'
@@ -76,6 +76,27 @@ function syncUnreadOverlay(): void {
     badge,
     `${unreadWorkspaceCount} unread workspace notification${unreadWorkspaceCount === 1 ? '' : 's'}`,
   )
+}
+
+function resolveMainWindowIconPath(): string | undefined {
+  const icoCandidates = [
+    join(app.getAppPath(), 'build', 'icon.ico'),
+    join(process.resourcesPath, 'build', 'icon.ico'),
+    join(process.resourcesPath, 'icon.ico'),
+  ]
+  for (const iconPath of icoCandidates) {
+    if (existsSync(iconPath)) return iconPath
+  }
+
+  const pngCandidates = [
+    join(app.getAppPath(), 'build', 'icon.png'),
+    join(process.resourcesPath, 'build', 'icon.png'),
+    join(process.resourcesPath, 'icon.png'),
+  ]
+  for (const iconPath of pngCandidates) {
+    if (existsSync(iconPath)) return iconPath
+  }
+  return undefined
 }
 
 function scheduleWindowStateSave(): void {
@@ -182,6 +203,7 @@ function createWindow(): void {
     autoHideMenuBar: true,
     titleBarStyle: 'default',
     titleBarOverlay: false,
+    icon: resolveMainWindowIconPath(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,

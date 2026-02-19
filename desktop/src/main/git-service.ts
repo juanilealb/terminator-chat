@@ -305,6 +305,23 @@ function sanitizeWorktreeName(name: string): string {
   return safe || 'worktree'
 }
 
+function buildWorktreeBaseDirName(repoName: string, worktreeName: string): string {
+  const safeWorktreeName = sanitizeWorktreeName(worktreeName)
+  return `${repoName}-ws-${safeWorktreeName}`
+}
+
+function resolveUniqueWorktreePath(parentDir: string, baseDirName: string): string {
+  let attempt = 0
+  while (true) {
+    const suffix = attempt === 0 ? '' : `-${attempt}`
+    const candidatePath = resolve(parentDir, `${baseDirName}${suffix}`)
+    if (!existsSync(candidatePath)) {
+      return candidatePath
+    }
+    attempt += 1
+  }
+}
+
 function sanitizeGithubRepoName(name: string): string {
   const safe = name
     .trim()
@@ -533,7 +550,12 @@ export class GitService {
 
     const parentDir = dirname(repoPath)
     const repoName = basename(repoPath)
-    const worktreePath = resolve(parentDir, `${repoName}-ws-${name}`)
+    const worktreeBaseDirName = buildWorktreeBaseDirName(repoName, name)
+    const preferredWorktreePath = resolve(parentDir, worktreeBaseDirName)
+    const worktreePath = force
+      ? preferredWorktreePath
+      : resolveUniqueWorktreePath(parentDir, worktreeBaseDirName)
+    ensureWithinParent(parentDir, worktreePath)
     const hasOrigin = await GitService.hasRemote(repoPath, 'origin')
 
     // Clean up stale worktree refs
@@ -675,8 +697,11 @@ export class GitService {
 
     const parentDir = dirname(repoPath)
     const repoName = basename(repoPath)
-    const safeWorktreeName = sanitizeWorktreeName(name)
-    const worktreePath = resolve(parentDir, `${repoName}-ws-${safeWorktreeName}`)
+    const worktreeBaseDirName = buildWorktreeBaseDirName(repoName, name)
+    const preferredWorktreePath = resolve(parentDir, worktreeBaseDirName)
+    const worktreePath = force
+      ? preferredWorktreePath
+      : resolveUniqueWorktreePath(parentDir, worktreeBaseDirName)
     ensureWithinParent(parentDir, worktreePath)
 
     reportCreateWorktreeProgress(onProgress, {
