@@ -1535,6 +1535,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const fileInputRef = useRef<HTMLInputElement>(null)
   // The tab's threadId is a local UUID. The real Codex SDK thread ID is different.
   const realThreadIdRef = useRef<string | null>(null)
+  const sessionModeRef = useRef<SessionMode>(sessionMode)
   // Guard against SDK item-id reuse across turns. We scope all item ids by turn.
   const eventTurnSequenceRef = useRef(0)
   const activeTurnHasItemsRef = useRef(false)
@@ -1636,6 +1637,10 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     () => (workspace ? projects.find((project) => project.id === workspace.projectId) : undefined),
     [workspace, projects],
   )
+
+  useEffect(() => {
+    sessionModeRef.current = sessionMode
+  }, [sessionMode])
 
   const currentBranchLockKey = useMemo(() => {
     if (!activeProject || !workspace?.branch) return null
@@ -2548,7 +2553,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
         if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
-        const shouldShowPlanCompletionCard = sessionMode === 'plan'
+        const shouldShowPlanCompletionCard = sessionModeRef.current === 'plan'
           && activeTurnHasPlanContentRef.current
           && !activeTurnHasQuestionPromptRef.current
         setLoading(false)
@@ -2655,7 +2660,6 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     notifyInactiveChatTab,
     appendChatMessage,
     appendPlanCompletionCard,
-    sessionMode,
   ])
 
   const handleLogin = useCallback(async () => {
