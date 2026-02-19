@@ -391,6 +391,7 @@ export function App() {
                                 threadId={tab.threadId}
                                 workspaceId={tab.workspaceId}
                                 worktreePath={chatWorkspace?.worktreePath}
+                                isActive={isActiveChat}
                               />
                             </div>
                           )

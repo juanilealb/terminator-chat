@@ -32,6 +32,7 @@ interface ChatPanelProps {
   threadId: string
   workspaceId: string
   worktreePath?: string
+  isActive?: boolean
 }
 
 const EMPTY_MESSAGES: ChatMessage[] = []
@@ -1477,7 +1478,7 @@ function LoadingIndicator() {
   )
 }
 
-export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProps) {
+export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = false }: ChatPanelProps) {
   const codexLoggedIn = useAppStore((s) => s.codexLoggedIn)
   const setCodexLoggedIn = useAppStore((s) => s.setCodexLoggedIn)
   const updateWorkspaceAgentPermissionMode = useAppStore((s) => s.updateWorkspaceAgentPermissionMode)
@@ -1641,6 +1642,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   useEffect(() => {
     sessionModeRef.current = sessionMode
   }, [sessionMode])
+
+  useEffect(() => {
+    if (!isActive || cancelInFlight) return
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+    })
+  }, [isActive, cancelInFlight])
 
   const currentBranchLockKey = useMemo(() => {
     if (!activeProject || !workspace?.branch) return null
