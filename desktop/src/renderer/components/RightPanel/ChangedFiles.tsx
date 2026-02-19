@@ -473,6 +473,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
   const commitFlowOption = COMMIT_FLOW_OPTIONS.find((option) => option.id === commitFlow) ?? COMMIT_FLOW_OPTIONS[0]
   const needsTargetBranch = commitFlow === 'commit-pr-target'
   const canSelectTargetBranch = availableBaseBranches.length > 0
+  const selectedPrBaseLabel = resolveSelectedPrBaseBranch() ?? 'repository default'
   const canCommit =
     !busy &&
     !!commitMsg.trim() &&
@@ -509,25 +510,32 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
             size="small"
             disabled={busy}
             onClick={handlePushBranch}
+            title={`Push current branch (${branchDisplayName}) to origin`}
           >
-            Push branch
+            Push to origin
           </Button>
           <Button
             appearance="secondary"
             size="small"
             disabled={busy}
             onClick={() => handleOpenOrCreatePr(false)}
+            title={`Open or create PR from ${branchDisplayName} to ${selectedPrBaseLabel}`}
           >
-            Open PR
+            Open or create PR
           </Button>
           <Button
             appearance="primary"
             size="small"
             disabled={busy}
             onClick={() => handleOpenOrCreatePr(true)}
+            title={`Push ${branchDisplayName} and open or create PR to ${selectedPrBaseLabel}`}
           >
-            Push and open PR
+            Push + open PR
           </Button>
+        </div>
+        <div className={styles.branchActionsHint}>
+          Source branch <span className={styles.branchActionsHintValue}>{branchDisplayName}</span> to base{' '}
+          <span className={styles.branchActionsHintValue}>{selectedPrBaseLabel}</span>
         </div>
       </div>
 

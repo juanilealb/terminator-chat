@@ -12,6 +12,7 @@ import { useAppStore } from '../../store/app-store'
 import {
   DEFAULT_AGENT_PERMISSION_MODE,
   DEFAULT_WORKSPACE_TYPE,
+  parseProjectOwnership,
   type AgentPermissionMode,
   type ChatMessage,
 } from '../../store/types'
@@ -63,6 +64,40 @@ const PLAN_MODE_PREFIX = [
   'If key details are missing, ask one concise clarifying question at a time and wait for my answer before continuing.',
   'Only provide the implementation plan once uncertainties are resolved.',
 ].join(' ')
+
+function buildThreadRepoContext(options: {
+  ownership: 'personal' | 'work'
+  projectName: string
+  repoPath: string
+  workspaceName?: string
+  worktreePath: string
+  branch?: string
+  githubPersonalLogin?: string
+  githubWorkLogin?: string
+}): string {
+  const ownership = options.ownership === 'work' ? 'work' : 'personal'
+  const preferredLogin = ownership === 'work'
+    ? options.githubWorkLogin?.trim()
+    : options.githubPersonalLogin?.trim()
+
+  const lines = [
+    'Automatic repository context:',
+    `- Repository ownership: ${ownership}.`,
+    '- Use this ownership for git identity/remotes by default.',
+    '- Do not ask whether this repo is personal or work unless the user asks to override it.',
+    `- Project: ${options.projectName}`,
+    `- Repo path: ${options.repoPath}`,
+    `- Workspace: ${(options.workspaceName ?? '').trim() || 'thread'}`,
+    `- Branch: ${(options.branch ?? '').trim() || 'unknown'}`,
+    `- Worktree path: ${options.worktreePath}`,
+  ]
+
+  if (preferredLogin) {
+    lines.push(`- Preferred GitHub login for this repo: ${preferredLogin}`)
+  }
+
+  return lines.join('\n')
+}
 
 interface ParsedQuestionOption {
   id: string
@@ -1406,6 +1441,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const addToast = useAppStore((s) => s.addToast)
   const projects = useAppStore((s) => s.projects)
   const workspaces = useAppStore((s) => s.workspaces)
+  const githubPersonalLogin = useAppStore((s) => s.settings.githubPersonalLogin)
+  const githubWorkLogin = useAppStore((s) => s.settings.githubWorkLogin)
   const messages = useAppStore((s) => s.chatMessages[threadId] ?? EMPTY_MESSAGES)
   const workspace = useAppStore((s) => s.workspaces.find((w) => w.id === workspaceId))
   const agentPermissionMode = workspace?.agentPermissionMode ?? 'default'
@@ -2427,6 +2464,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           }
 
     // Create real Codex thread if needed (pass model & effort)
+    let isFirstMessageInThread = false
     if (!realThreadIdRef.current) {
       try {
         const realId = await window.api.chat.createThread(
@@ -2438,6 +2476,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           workspace?.name,
         )
         realThreadIdRef.current = realId
+        isFirstMessageInThread = true
         eventTurnSequenceRef.current = 0
         activeTurnHasItemsRef.current = false
       } catch (err) {
@@ -2487,18 +2526,42 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
 
     // Build input payload
+    const ownership = activeProject ? parseProjectOwnership(activeProject.ownership) : null
+    const repoContext = (
+      isFirstMessageInThread &&
+      activeProject &&
+      workspace &&
+      worktreePath &&
+      ownership
+    )
+      ? buildThreadRepoContext({
+          ownership,
+          projectName: activeProject.name,
+          repoPath: activeProject.repoPath,
+          workspaceName: workspace.name,
+          worktreePath,
+          branch: workspace.branch,
+          githubPersonalLogin,
+          githubWorkLogin,
+        })
+      : ''
+    const basePrompt = isPlanMode ? planPrompt : trimmed
+    const promptForModel = repoContext
+      ? `${repoContext}\n\n${basePrompt}`.trim()
+      : basePrompt
+
     let sendInput: string | Array<{ type: string; text?: string; path?: string }>
     if (images.length > 0) {
       const parts: Array<{ type: string; text?: string; path?: string }> = []
-      if (isPlanMode || trimmed) {
-        parts.push({ type: 'text', text: isPlanMode ? planPrompt : trimmed })
+      if (promptForModel) {
+        parts.push({ type: 'text', text: promptForModel })
       }
       for (const img of images) {
         parts.push({ type: 'local_image', path: img.path })
       }
       sendInput = parts
     } else {
-      sendInput = isPlanMode ? planPrompt : trimmed
+      sendInput = promptForModel
     }
 
     // Send to backend
@@ -2538,6 +2601,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     activeProject,
     workspace,
     agentPermissionMode,
+    githubPersonalLogin,
+    githubWorkLogin,
     findStatusConflictForCurrentBranch,
     enrichBranchConflict,
     releaseOwnedBranchLock,

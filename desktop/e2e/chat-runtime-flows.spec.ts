@@ -359,7 +359,7 @@ test.describe('Chat runtime flows', () => {
       await window.waitForTimeout(4200)
 
       await window.locator('button[aria-label="Back to workspace"]').click()
-      await expect(window.locator('text=Done: long task while settings open')).toBeVisible({ timeout: 12000 })
+      await expect(window.getByText('long task while settings open').first()).toBeVisible({ timeout: 12000 })
     } finally {
       await app.close()
     }

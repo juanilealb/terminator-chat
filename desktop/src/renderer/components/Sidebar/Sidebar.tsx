@@ -111,6 +111,19 @@ function normalizeThreadTitle(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
 
+function normalizeBranchName(input: string): string {
+  return input
+    .trim()
+    .replace(/^refs\/heads\//, "")
+    .replace(/^refs\/remotes\/origin\//, "")
+    .replace(/^origin\//, "");
+}
+
+function toUserErrorMessage(err: unknown, fallback: string): string {
+  if (!(err instanceof Error)) return fallback;
+  return err.message || fallback;
+}
+
 function getThreadDisplayName(
   tab: Extract<Tab, { type: "chat" }>,
   messagesByThread: Record<string, ChatMessage[]>,
@@ -940,88 +953,137 @@ export function Sidebar() {
   const handleDeleteWorkspace = useCallback(
     (e: React.MouseEvent, ws: { id: string; name: string }) => {
       e.stopPropagation();
+      const selectedWorkspace = workspaces.find((entry) => entry.id === ws.id);
+      const project = selectedWorkspace
+        ? projects.find((entry) => entry.id === selectedWorkspace.projectId)
+        : undefined;
+
+      if (!selectedWorkspace || !project) {
+        void deleteWorkspace(ws.id);
+        return;
+      }
+
       if (e.shiftKey) {
-        deleteWorkspace(ws.id);
-        return;
-      }
-      showConfirmDialog({
-        title: "Delete thread branch",
-        message: `Delete thread branch "${ws.name}"? This will remove the git worktree from disk.`,
-        confirmLabel: "Delete",
-        destructive: true,
-        onConfirm: () => {
-          deleteWorkspace(ws.id);
-          dismissConfirmDialog();
-        },
-      });
-    },
-    [showConfirmDialog, deleteWorkspace, dismissConfirmDialog],
-  );
-
-  const handleDeleteThread = useCallback(
-    async (
-      e: React.MouseEvent,
-      thread: { id: string; name: string; workspaceId: string; worktreePath: string },
-    ) => {
-      e.stopPropagation();
-      let statuses: Array<{ path: string; status: string }> = [];
-      try {
-        statuses = await window.api.git.getStatus(thread.worktreePath);
-      } catch {
-        statuses = [];
-      }
-
-      if (statuses.length === 0) {
-        removeTab(thread.id);
+        void deleteWorkspace(ws.id);
         return;
       }
 
-      showConfirmDialog({
-        title: "Pending changes in this thread",
-        message: `Thread "${thread.name}" has uncommitted changes. Do you want to commit first, discard changes, or cancel?`,
-        confirmLabel: "Commit first",
-        secondaryLabel: "Discard and close",
-        secondaryDestructive: true,
-        onConfirm: () => {
-          setActiveWorkspace(thread.workspaceId);
-          setActiveTab(thread.id);
-          setRightPanelMode("changes");
-          useAppStore.setState({ rightPanelOpen: true });
-          dismissConfirmDialog();
-        },
-        onSecondary: () => {
-          const tracked = Array.from(
-            new Set(statuses.filter((entry) => entry.status !== "untracked").map((entry) => entry.path)),
-          );
-          const untracked = Array.from(
-            new Set(statuses.filter((entry) => entry.status === "untracked").map((entry) => entry.path)),
-          );
+      void (async () => {
+        let branch = normalizeBranchName(selectedWorkspace.branch ?? "");
+        let hasUncommittedChanges = false;
 
-          void (async () => {
-            try {
-              await window.api.git.discard(thread.worktreePath, tracked, untracked);
-              removeTab(thread.id);
-            } catch (err) {
-              const message =
-                err instanceof Error
-                  ? err.message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, "")
-                  : "Failed to discard changes";
-              addToast({ id: crypto.randomUUID(), message, type: "error" });
-            } finally {
+        try {
+          const [currentBranch, statuses] = await Promise.all([
+            window.api.git
+              .getCurrentBranch(selectedWorkspace.worktreePath)
+              .catch(() => ""),
+            window.api.git
+              .getStatus(selectedWorkspace.worktreePath)
+              .catch(() => []),
+          ]);
+          if (typeof currentBranch === "string" && currentBranch.trim().length > 0) {
+            branch = normalizeBranchName(currentBranch);
+          }
+          hasUncommittedChanges = Array.isArray(statuses) && statuses.length > 0;
+        } catch {
+          // Keep the default delete confirmation flow if git metadata cannot be read.
+        }
+
+        if (hasUncommittedChanges) {
+          showConfirmDialog({
+            title: "Thread has uncommitted changes",
+            message: `Thread "${selectedWorkspace.name}" has local changes. Open Changes to commit first, or delete it now.`,
+            confirmLabel: "Open changes",
+            secondaryLabel: "Delete anyway",
+            secondaryDestructive: true,
+            onConfirm: () => {
+              setActiveWorkspace(selectedWorkspace.id);
+              setRightPanelMode("changes");
               dismissConfirmDialog();
-            }
-          })();
-        },
-      });
+            },
+            onSecondary: () => {
+              void deleteWorkspace(selectedWorkspace.id);
+              dismissConfirmDialog();
+            },
+          });
+          return;
+        }
+
+        const lowerBranch = branch.toLowerCase();
+        const canOfferShipFlow =
+          selectedWorkspace.worktreePath !== project.repoPath &&
+          !!branch &&
+          branch !== "HEAD" &&
+          lowerBranch !== "main" &&
+          lowerBranch !== "master";
+
+        if (canOfferShipFlow) {
+          showConfirmDialog({
+            title: "Delete thread branch",
+            message: `Before deleting "${selectedWorkspace.name}", do you want to push "${branch}" and open or update its PR to main?`,
+            confirmLabel: "Push and open PR",
+            secondaryLabel: "Delete without PR",
+            secondaryDestructive: true,
+            onConfirm: () => {
+              dismissConfirmDialog();
+              void (async () => {
+                try {
+                  const result = await window.api.git.shipBranchToMain(
+                    project.repoPath,
+                    branch,
+                  );
+                  if (result.prUrl) {
+                    window.open(result.prUrl);
+                  }
+                  addToast({
+                    id: crypto.randomUUID(),
+                    message: result.prCreated
+                      ? `Opened PR to ${result.mainBranch}, then deleted "${selectedWorkspace.name}".`
+                      : `Updated existing PR to ${result.mainBranch}, then deleted "${selectedWorkspace.name}".`,
+                    type: "info",
+                  });
+                  await deleteWorkspace(selectedWorkspace.id);
+                } catch (err) {
+                  addToast({
+                    id: crypto.randomUUID(),
+                    message: toUserErrorMessage(
+                      err,
+                      `Failed to push "${branch}" and open PR.`,
+                    ),
+                    type: "error",
+                  });
+                }
+              })();
+            },
+            onSecondary: () => {
+              void deleteWorkspace(selectedWorkspace.id);
+              dismissConfirmDialog();
+            },
+          });
+          return;
+        }
+
+        showConfirmDialog({
+          title: "Delete thread branch",
+          message: `Delete thread branch "${selectedWorkspace.name}"? This will remove the git worktree from disk.`,
+          confirmLabel: "Delete",
+          destructive: true,
+          onConfirm: () => {
+            void deleteWorkspace(selectedWorkspace.id);
+            dismissConfirmDialog();
+          },
+        });
+      })();
     },
     [
-      addToast,
+      workspaces,
+      projects,
+      showConfirmDialog,
+      deleteWorkspace,
       dismissConfirmDialog,
-      removeTab,
-      setActiveTab,
       setActiveWorkspace,
       setRightPanelMode,
-      showConfirmDialog,
+      addToast,
     ],
   );
 
@@ -1237,16 +1299,14 @@ export function Sidebar() {
                         {latestTs > 0 && (
                           <span className={styles.threadTime}>{formatRelativeTime(latestTs, now)}</span>
                         )}
-                        <Tooltip label="Delete thread">
+                        <Tooltip label="Delete thread branch">
                           <button
-                            aria-label={`Delete thread ${displayName}`}
+                            aria-label={`Delete thread branch ${displayName}`}
                             className={styles.workspaceDeleteBtn}
                             onClick={(e) =>
-                              void handleDeleteThread(e, {
-                                id: tab.id,
-                                name: displayName,
-                                workspaceId: workspace.id,
-                                worktreePath: workspace.worktreePath,
+                              handleDeleteWorkspace(e, {
+                                id: workspace.id,
+                                name: workspace.name,
                               })
                             }
                           >
