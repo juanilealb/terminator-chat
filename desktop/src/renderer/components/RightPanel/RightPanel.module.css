@@ -101,6 +101,32 @@
   gap: var(--space-2);
 }
 
+.branchActionsCard {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: color-mix(in srgb, var(--bg-surface) 90%, #ffffff 10%);
+}
+
+.branchActionsRow {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.branchBadge {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-muted);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+}
+
 .commitInput {
   min-height: 30px;
   max-height: 82px;
@@ -333,6 +359,15 @@
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
   line-height: var(--leading-relaxed);
+}
+
+.noChangesBanner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-muted);
 }
 
 /* ── Memory Panel ── */

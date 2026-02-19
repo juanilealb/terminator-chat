@@ -338,90 +338,91 @@ export function App() {
           </div>
         )}
         <div className={styles.layout}>
-          {settingsOpen ? (
-            <SettingsPanel />
-          ) : (
-            <Allotment>
-              {/* Sidebar */}
-              {sidebarCollapsed ? (
-                <Allotment.Pane minSize={26} maxSize={40} preferredSize={30}>
-                  <SidebarRail />
-                </Allotment.Pane>
-              ) : (
-                <Allotment.Pane minSize={180} maxSize={420} preferredSize={240}>
-                  <Sidebar />
-                </Allotment.Pane>
-              )}
-
-              {/* Center */}
-              <Allotment.Pane>
-                <div className={styles.centerPanel}>
-                  <TabBar />
-                  <div className={styles.contentArea}>
-                    {!activeTab ? (
-                      <div className={styles.welcome}>
-                        <div className={styles.welcomeLogo}>terminator chat</div>
-                        <div className={styles.welcomeHint}>
-                          Add a project to get started, or press
-                          <span className={styles.welcomeShortcut}>
-                            <kbd>{formatShortcut(SHORTCUT_MAP.newChat.mac, SHORTCUT_MAP.newChat.win)}</kbd>
-                          </span>
-                          for a new thread
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        {/* Keep all chat panels mounted so streaming responses continue across tab switches */}
-                        {tabs
-                          .filter((tab) => tab.type === 'chat')
-                          .map((tab) => {
-                            const chatWorkspace = workspaces.find((w) => w.id === tab.workspaceId)
-                            const isActiveChat = activeTab?.type === 'chat' && activeTab.id === tab.id
-                            return (
-                              <div
-                                key={tab.id}
-                                style={{ display: isActiveChat ? 'block' : 'none', height: '100%' }}
-                              >
-                                <ChatPanel
-                                  threadId={tab.threadId}
-                                  workspaceId={tab.workspaceId}
-                                  worktreePath={chatWorkspace?.worktreePath}
-                                />
-                              </div>
-                            )
-                          })}
-
-                        {/* Render active file editor */}
-                        {activeTab?.type === 'file' && (
-                          <FileEditor
-                            key={activeTab.id}
-                            tabId={activeTab.id}
-                            filePath={activeTab.filePath}
-                            active={true}
-                          />
-                        )}
-
-                        {/* Render active diff viewer */}
-                        {activeTab?.type === 'diff' && workspace && (
-                          <DiffViewer
-                            key={activeTab.id}
-                            worktreePath={workspace.worktreePath}
-                            active={true}
-                          />
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
+          <Allotment>
+            {/* Sidebar */}
+            {sidebarCollapsed ? (
+              <Allotment.Pane minSize={26} maxSize={40} preferredSize={30}>
+                <SidebarRail />
               </Allotment.Pane>
+            ) : (
+              <Allotment.Pane minSize={180} maxSize={420} preferredSize={240}>
+                <Sidebar />
+              </Allotment.Pane>
+            )}
 
-              {/* Right Panel */}
-              {rightPanelOpen && (
-                <Allotment.Pane minSize={200} maxSize={500} preferredSize={280}>
-                  <RightPanel />
-                </Allotment.Pane>
-              )}
-            </Allotment>
+            {/* Center */}
+            <Allotment.Pane>
+              <div className={styles.centerPanel}>
+                <TabBar />
+                <div className={styles.contentArea}>
+                  {!activeTab ? (
+                    <div className={styles.welcome}>
+                      <div className={styles.welcomeLogo}>terminator chat</div>
+                      <div className={styles.welcomeHint}>
+                        Add a project to get started, or press
+                        <span className={styles.welcomeShortcut}>
+                          <kbd>{formatShortcut(SHORTCUT_MAP.newChat.mac, SHORTCUT_MAP.newChat.win)}</kbd>
+                        </span>
+                        for a new thread
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Keep all chat panels mounted so streaming responses continue across tab switches */}
+                      {tabs
+                        .filter((tab) => tab.type === 'chat')
+                        .map((tab) => {
+                          const chatWorkspace = workspaces.find((w) => w.id === tab.workspaceId)
+                          const isActiveChat = activeTab?.type === 'chat' && activeTab.id === tab.id
+                          return (
+                            <div
+                              key={tab.id}
+                              style={{ display: isActiveChat ? 'block' : 'none', height: '100%' }}
+                            >
+                              <ChatPanel
+                                threadId={tab.threadId}
+                                workspaceId={tab.workspaceId}
+                                worktreePath={chatWorkspace?.worktreePath}
+                              />
+                            </div>
+                          )
+                        })}
+
+                      {/* Render active file editor */}
+                      {activeTab?.type === 'file' && (
+                        <FileEditor
+                          key={activeTab.id}
+                          tabId={activeTab.id}
+                          filePath={activeTab.filePath}
+                          active={true}
+                        />
+                      )}
+
+                      {/* Render active diff viewer */}
+                      {activeTab?.type === 'diff' && workspace && (
+                        <DiffViewer
+                          key={activeTab.id}
+                          worktreePath={workspace.worktreePath}
+                          active={true}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </Allotment.Pane>
+
+            {/* Right Panel */}
+            {rightPanelOpen && (
+              <Allotment.Pane minSize={200} maxSize={500} preferredSize={280}>
+                <RightPanel />
+              </Allotment.Pane>
+            )}
+          </Allotment>
+          {settingsOpen && (
+            <div className={styles.settingsOverlay}>
+              <SettingsPanel />
+            </div>
           )}
         </div>
         <div className={styles.statusBar}>

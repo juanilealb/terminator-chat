@@ -108,6 +108,9 @@ const PLAN_COMPLETION_QUESTION: ParsedInteractiveQuestion = {
 const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
 const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
+const TOOL_TIMELINE_PREVIEW_LIMIT = 10
+const AUTO_SCROLL_THRESHOLD_PX = 72
+const MAX_QUEUED_PROMPTS = 20
 const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
 const INTERRUPT_THREAD_EVENT = 'chat:interrupt-thread'
 
@@ -140,12 +143,21 @@ interface PendingSendPayload {
   images: AttachedImage[]
 }
 
+interface QueuedPromptPayload {
+  id: string
+  text: string
+  mode: SessionMode
+  images: AttachedImage[]
+  createdAt: number
+}
+
 interface InterruptThreadEventDetail {
   threadId: string
   reason?: string
 }
 
 const branchExecutionLocksByKey = new Map<string, BranchExecutionLock>()
+const queuedPromptsByThread = new Map<string, QueuedPromptPayload[]>()
 
 function toBranchLockKey(projectId: string, branch: string): string {
   return `${projectId}:${normalizeBranchName(branch).toLowerCase()}`
@@ -304,24 +316,10 @@ function pickTrimmedText(payload: Record<string, unknown>, ...keys: string[]): s
   return null
 }
 
-function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
-  const lines: string[] = []
-  if (question.header) lines.push(question.header)
-  lines.push(question.prompt)
-  lines.push('')
-  for (const option of question.options) {
-    lines.push(option.detail
-      ? `${option.index}. ${option.label} - ${option.detail}`
-      : `${option.index}. ${option.label}`)
-  }
-  if (question.footer) {
-    lines.push('')
-    lines.push(question.footer)
-  }
-  return lines.join('\n')
-}
+function parseQuestionDescriptor(value: unknown): ParsedInteractiveQuestion | null {
+  const payload = toRecord(value)
+  if (!payload) return null
 
-function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
   const prompt = pickTrimmedText(payload, 'question', 'prompt', 'text')
   if (!prompt) return null
 
@@ -340,18 +338,15 @@ function parseInteractiveQuestionPayload(payload: Record<string, unknown>): Pars
       options.push({ id: `opt-${i + 1}-${label}`, index: i + 1, label })
       continue
     }
-    if (!option || typeof option !== 'object') continue
-    const entry = option as Record<string, unknown>
+    const entry = toRecord(option)
+    if (!entry) continue
     const label = pickTrimmedText(entry, 'label', 'value', 'name')
     if (!label) continue
-    const detail = pickTrimmedText(entry, 'description', 'detail')
-    const id = pickTrimmedText(entry, 'id')
-      ?? `opt-${i + 1}-${label}`
     options.push({
-      id,
+      id: pickTrimmedText(entry, 'id') ?? `opt-${i + 1}-${label}`,
       index: i + 1,
       label,
-      detail: detail ?? undefined,
+      detail: pickTrimmedText(entry, 'description', 'detail') ?? undefined,
     })
   }
 
@@ -365,12 +360,46 @@ function parseInteractiveQuestionPayload(payload: Record<string, unknown>): Pars
   }
 }
 
+function parseQuestionArray(value: unknown): ParsedInteractiveQuestion | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+
+  for (const question of value) {
+    const parsed = parseQuestionDescriptor(question)
+    if (parsed) return parsed
+  }
+
+  return null
+}
+
+function toInteractiveQuestionText(question: ParsedInteractiveQuestion): string {
+  const lines: string[] = []
+  if (question.header) lines.push(question.header)
+  lines.push(question.prompt)
+  lines.push('')
+  for (const option of question.options) {
+    lines.push(option.detail
+      ? `${option.index}. ${option.label} - ${option.detail}`
+      : `${option.index}. ${option.label}`)
+  }
+  if (question.footer) {
+    lines.push('')
+    lines.push(question.footer)
+  }
+  return lines.join('\n')
+}
+
+function parseInteractiveQuestionPayload(payload: Record<string, unknown>): ParsedInteractiveQuestion | null {
+  return parseQuestionDescriptor(payload) ?? parseQuestionArray(payload.questions)
+}
+
 function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | undefined): ParsedInteractiveQuestion | null {
   if (!metadata) return null
   const raw = metadata.interactiveQuestion
   if (!raw || typeof raw !== 'object') return null
 
   const payload = raw as Record<string, unknown>
+  const fallback = parseInteractiveQuestionPayload(payload)
+  if (fallback) return fallback
   const prompt = pickTrimmedText(payload, 'prompt')
   const optionsRaw = payload.options
   if (!prompt || !Array.isArray(optionsRaw) || optionsRaw.length === 0) return null
@@ -414,6 +443,63 @@ function isThreadItemData(data: ChatEventData): data is ChatThreadItemData {
 function toRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
+}
+
+function extractInteractiveQuestionFromValue(
+  value: unknown,
+  depth = 0,
+  visited = new Set<unknown>(),
+): ParsedInteractiveQuestion | null {
+  if (depth > 5 || value == null) return null
+  if (visited.has(value)) return null
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const parsed = extractInteractiveQuestionFromValue(entry, depth + 1, visited)
+      if (parsed) return parsed
+    }
+    return null
+  }
+
+  const payload = toRecord(value)
+  if (!payload) return null
+
+  visited.add(value)
+
+  const direct = parseInteractiveQuestionPayload(payload)
+  if (direct) return direct
+
+  const nestedKeys = [
+    'raw',
+    'payload',
+    'data',
+    'item',
+    'arguments',
+    'args',
+    'input',
+    'structured_content',
+    'result',
+    'content',
+    'tool_input',
+    'tool_args',
+    'meta',
+    'metadata',
+  ]
+
+  for (const key of nestedKeys) {
+    if (!(key in payload)) continue
+    const parsed = extractInteractiveQuestionFromValue(payload[key], depth + 1, visited)
+    if (parsed) return parsed
+  }
+
+  const nestedKeysSet = new Set(nestedKeys)
+  for (const [key, nested] of Object.entries(payload)) {
+    if (nestedKeysSet.has(key)) continue
+    const parsed = extractInteractiveQuestionFromValue(nested, depth + 1, visited)
+    if (parsed) return parsed
+  }
+
+  return null
 }
 
 function looksInteractiveQuestionText(content: string): boolean {
@@ -500,7 +586,15 @@ function parseInteractiveQuestionText(content: string): ParsedInteractiveQuestio
 }
 
 function mergeModelOptionsWithRequired(options: DropdownOption[]): DropdownOption[] {
-  const merged = [...options]
+  const merged = options.map((option) => {
+    if (option.value === SPARK_MODEL_OPTION.value) {
+      return {
+        ...option,
+        label: SPARK_MODEL_OPTION.label,
+      }
+    }
+    return option
+  })
   if (!merged.some((option) => option.value === SPARK_MODEL_OPTION.value)) {
     merged.push(SPARK_MODEL_OPTION)
   }
@@ -644,6 +738,15 @@ interface AttachedImage {
   path: string
   name: string
   previewUrl: string
+}
+
+function queuePreviewText(payload: QueuedPromptPayload): string {
+  const text = payload.text.trim()
+  if (text.length > 0) return text.replace(/\s+/g, ' ')
+  if (payload.images.length > 0) {
+    return `[${payload.images.length} image${payload.images.length === 1 ? '' : 's'}]`
+  }
+  return '[empty]'
 }
 
 function formatMessageTime(timestamp: number): string {
@@ -858,35 +961,253 @@ function DetailSection({ label, value }: { label: string; value: unknown }) {
   )
 }
 
-function CommandCard({ message }: { message: ChatMessage }) {
-  const command = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
-  const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
-  const status = message.metadata?.status
-  const exitCode = message.metadata?.exit_code
+function stripMatchingQuotes(value: string): string {
+  const trimmed = value.trim()
+  if (trimmed.length < 2) return trimmed
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith('\'') && trimmed.endsWith('\''))) {
+    return trimmed.slice(1, -1)
+  }
+  return trimmed
+}
+
+function summarizeCommandForDisplay(command: string): string {
+  const trimmed = command.trim()
+  if (!trimmed) return 'Command'
+
+  const wrappers: RegExp[] = [
+    /^(?:"[^"]*\\)?powershell(?:\.exe)?"?\s+-Command\s+/i,
+    /^(?:"[^"]*\\)?pwsh(?:\.exe)?"?\s+-Command\s+/i,
+    /^(?:"[^"]*\\)?cmd(?:\.exe)?"?\s+\/c\s+/i,
+    /^(?:\/bin\/(?:bash|zsh|sh)|bash|zsh|sh)\s+-lc\s+/i,
+  ]
+
+  let normalized = trimmed
+  for (const pattern of wrappers) {
+    if (pattern.test(normalized)) {
+      normalized = normalized.replace(pattern, '').trim()
+      break
+    }
+  }
+
+  normalized = stripMatchingQuotes(normalized)
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, '\'')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!normalized) normalized = trimmed
+  if (normalized.length > 180) {
+    return `${normalized.slice(0, 177)}...`
+  }
+  return normalized
+}
+
+interface ToolTimelineEntry {
+  id: string
+  type: 'command' | 'tool' | 'reasoning'
+  title: string
+  subtitle?: string
+  timestamp: number
+  status: unknown
+  exitCode?: number
+  output?: string
+  details: Array<{ label: string; value: unknown }>
+}
+
+function isToolTimelineMessage(message: ChatMessage): boolean {
+  return message.type === 'command' || message.type === 'tool-call' || message.type === 'reasoning'
+}
+
+function stripMarkdownForPreview(text: string): string {
+  return text
+    .replace(/```(?:[\w-]+)?\n?/g, '')
+    .replace(/```/g, '')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/__/g, '')
+}
+
+function summarizeReasoningForDisplay(reasoning: string): string {
+  const normalized = stripMarkdownForPreview(reasoning).replace(/\s+/g, ' ').trim()
+  if (!normalized) return 'Reasoning'
+  if (normalized.length > 140) return `${normalized.slice(0, 137)}...`
+  return normalized
+}
+
+function toToolTimelineEntry(message: ChatMessage): ToolTimelineEntry | null {
+  if (message.type === 'command') {
+    const fullCommand = (message.metadata?.command as string | undefined)?.trim() || message.content.trim() || 'Command'
+    const shortCommand = summarizeCommandForDisplay(fullCommand)
+    const output = (message.metadata?.aggregated_output as string | undefined) ?? ''
+    const details: Array<{ label: string; value: unknown }> = []
+    if (shortCommand !== fullCommand) {
+      details.push({ label: 'Full command', value: fullCommand })
+    }
+
+    return {
+      id: message.id,
+      type: 'command',
+      title: shortCommand,
+      timestamp: message.timestamp,
+      status: message.metadata?.status,
+      exitCode: typeof message.metadata?.exit_code === 'number' ? message.metadata.exit_code : undefined,
+      output,
+      details,
+    }
+  }
+
+  if (message.type === 'tool-call') {
+    const toolName = (message.metadata?.tool_name as string | undefined)?.trim() || 'tool-call'
+    const server = (message.metadata?.server as string | undefined)?.trim()
+    const tool = (message.metadata?.tool as string | undefined)?.trim()
+    const query = (message.metadata?.query as string | undefined)?.trim()
+    const itemCount = typeof message.metadata?.item_count === 'number' ? message.metadata.item_count : undefined
+    const completedCount = typeof message.metadata?.completed_count === 'number' ? message.metadata.completed_count : undefined
+
+    const title = server && tool ? `${server}.${tool}` : toolName
+    const subtitle = query
+      ? `Query: ${query}`
+      : typeof itemCount === 'number'
+        ? `Tasks: ${completedCount ?? 0}/${itemCount}`
+        : undefined
+
+    const details: Array<{ label: string; value: unknown }> = [
+      { label: 'Arguments', value: message.metadata?.arguments },
+      { label: 'Result', value: message.metadata?.result },
+      { label: 'Items', value: message.metadata?.items },
+      { label: 'Error', value: message.metadata?.error },
+      { label: 'Raw payload', value: message.metadata?.raw },
+    ]
+
+    return {
+      id: message.id,
+      type: 'tool',
+      title,
+      subtitle,
+      timestamp: message.timestamp,
+      status: message.metadata?.status,
+      details,
+    }
+  }
+
+  if (message.type === 'reasoning') {
+    return {
+      id: message.id,
+      type: 'reasoning',
+      title: summarizeReasoningForDisplay(message.content),
+      timestamp: message.timestamp,
+      status: null,
+      details: [
+        { label: 'Reasoning', value: message.content },
+      ],
+    }
+  }
+
+  return null
+}
+
+function formatToolTimelineDotClassName(entry: ToolTimelineEntry): string {
+  if (entry.type === 'reasoning') return styles.toolTimelineDotNeutral
+  const { status } = entry
+  if (status === 'completed') return styles.toolTimelineDotSuccess
+  if (status === 'failed') return styles.toolTimelineDotFail
+  return styles.toolTimelineDotRunning
+}
+
+function ToolTimelineGroup({ messages }: { messages: ChatMessage[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const entries = useMemo(
+    () => messages
+      .map((message) => toToolTimelineEntry(message))
+      .filter((entry): entry is ToolTimelineEntry => entry !== null),
+    [messages],
+  )
+
+  if (entries.length === 0) return null
+
+  const toolCallsCount = entries.filter((entry) => entry.type !== 'reasoning').length
+  const activityLabel = toolCallsCount > 0
+    ? `Tool calls (${toolCallsCount})`
+    : `Activity (${entries.length})`
+  const hiddenCount = showAll || entries.length <= TOOL_TIMELINE_PREVIEW_LIMIT
+    ? 0
+    : entries.length - TOOL_TIMELINE_PREVIEW_LIMIT
+  const visibleEntries = hiddenCount > 0
+    ? entries.slice(-TOOL_TIMELINE_PREVIEW_LIMIT)
+    : entries
+  const lastTimestamp = visibleEntries[visibleEntries.length - 1]?.timestamp ?? Date.now()
+
   return (
     <div className={`${styles.message} ${styles.messageAssistant}`}>
-      <div className={styles.commandBlock}>
-        <div className={styles.commandHeader}>
-          <span className={styles.commandLabel}>Command</span>
-          <span className={styles.commandText}>{command}</span>
-          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
-          {typeof exitCode === 'number' && (
-            <span className={`${styles.exitCode} ${exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
-              exit {exitCode}
-            </span>
-          )}
+      <div className={styles.toolTimelineCard}>
+        <div className={styles.toolTimelineHeader}>
+          <span className={`${styles.commandLabel} ${styles.toolTimelineLabel}`}>{activityLabel}</span>
         </div>
-        {output.trim() && (
-          <details className={styles.toolDetailBlock}>
-            <summary className={styles.toolDetailSummary}>Output</summary>
-            <pre className={styles.commandOutput}>{output}</pre>
-          </details>
+
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className={styles.toolTimelineToggle}
+            onClick={() => setShowAll(true)}
+          >
+            Show {hiddenCount} earlier
+          </button>
+        )}
+
+        <div className={styles.toolTimelineList}>
+          {visibleEntries.map((entry) => (
+            <details key={entry.id} className={styles.toolTimelineItem}>
+              <summary className={styles.toolTimelineItemSummary}>
+                <span className={`${styles.toolTimelineDot} ${formatToolTimelineDotClassName(entry)}`} />
+                <span className={styles.toolTimelineType}>{entry.type}</span>
+                <span className={styles.toolTimelineTitle}>{entry.title}</span>
+                {entry.status != null && (
+                  <span className={`${styles.exitCode} ${styles.toolTimelineMeta} ${formatStatusClassName(entry.status)}`}>
+                    {formatStatusLabel(entry.status)}
+                  </span>
+                )}
+                {typeof entry.exitCode === 'number' && (
+                  <span className={`${styles.exitCode} ${styles.toolTimelineMeta} ${entry.exitCode === 0 ? styles.exitCodeSuccess : styles.exitCodeFail}`}>
+                    exit {entry.exitCode}
+                  </span>
+                )}
+              </summary>
+
+              {entry.subtitle && <div className={styles.toolTimelineSubtitle}>{entry.subtitle}</div>}
+              {entry.output?.trim() && (
+                <details className={styles.toolDetailBlock}>
+                  <summary className={styles.toolDetailSummary}>Output</summary>
+                  <pre className={styles.commandOutput}>{entry.output}</pre>
+                </details>
+              )}
+              {entry.details.map((detail) => (
+                <DetailSection key={`${entry.id}:${detail.label}`} label={detail.label} value={detail.value} />
+              ))}
+            </details>
+          ))}
+        </div>
+
+        {showAll && entries.length > TOOL_TIMELINE_PREVIEW_LIMIT && (
+          <button
+            type="button"
+            className={styles.toolTimelineToggle}
+            onClick={() => setShowAll(false)}
+          >
+            Show latest {TOOL_TIMELINE_PREVIEW_LIMIT}
+          </button>
         )}
       </div>
-      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
+      <div className={styles.messageTime}>{formatMessageTime(lastTimestamp)}</div>
     </div>
   )
 }
+
+type ChatRenderBlock =
+  | { kind: 'message'; message: ChatMessage }
+  | { kind: 'tool-group'; messages: ChatMessage[] }
 
 function FileChangeCard({ message }: { message: ChatMessage }) {
   const changes = (message.metadata?.changes as Array<{ path: string; kind: string }> | undefined) ?? []
@@ -898,58 +1219,24 @@ function FileChangeCard({ message }: { message: ChatMessage }) {
           <div className={styles.fileChangeList}>
             {changes.map((change) => (
               <div key={`${change.kind}:${change.path}`} className={styles.fileChangeItem}>
-                <span className={`${styles.fileChangeKind} ${
-                  change.kind === 'add'
-                    ? styles.fileChangeAdd
-                    : change.kind === 'delete'
-                      ? styles.fileChangeDelete
-                      : styles.fileChangeUpdate
-                }`}
+                <span
+                  className={`${styles.fileChangeSign} ${
+                    change.kind === 'add'
+                      ? styles.fileChangeAdd
+                      : change.kind === 'delete'
+                        ? styles.fileChangeDelete
+                        : styles.fileChangeUpdate
+                  }`}
                 >
-                  {change.kind}
+                  {change.kind === 'add' ? '+' : change.kind === 'delete' ? '-' : '~'}
                 </span>
-                <span>{change.path}</span>
+                <span className={styles.fileChangePath}>{change.path}</span>
               </div>
             ))}
           </div>
         ) : (
           <div className={styles.reasoningContent}>No file changes reported.</div>
         )}
-      </div>
-      <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
-    </div>
-  )
-}
-
-function ToolCallCard({ message }: { message: ChatMessage }) {
-  const toolName = (message.metadata?.tool_name as string | undefined)?.trim() || 'tool-call'
-  const status = message.metadata?.status
-  const server = (message.metadata?.server as string | undefined)?.trim()
-  const tool = (message.metadata?.tool as string | undefined)?.trim()
-  const query = (message.metadata?.query as string | undefined)?.trim()
-  const itemCount = typeof message.metadata?.item_count === 'number' ? message.metadata.item_count : undefined
-  const completedCount = typeof message.metadata?.completed_count === 'number' ? message.metadata.completed_count : undefined
-  const title = server && tool ? `${server}.${tool}` : toolName
-  const subtitle = query
-    ? `Query: ${query}`
-    : typeof itemCount === 'number'
-      ? `Tasks: ${completedCount ?? 0}/${itemCount}`
-      : ''
-
-  return (
-    <div className={`${styles.message} ${styles.messageAssistant}`}>
-      <div className={styles.toolCallCard}>
-        <div className={styles.toolCallHeader}>
-          <span className={styles.commandLabel}>Tool</span>
-          <span className={styles.commandText}>{title}</span>
-          <span className={`${styles.exitCode} ${formatStatusClassName(status)}`}>{formatStatusLabel(status)}</span>
-        </div>
-        {subtitle && <div className={styles.toolCallSubtitle}>{subtitle}</div>}
-        <DetailSection label="Arguments" value={message.metadata?.arguments} />
-        <DetailSection label="Result" value={message.metadata?.result} />
-        <DetailSection label="Items" value={message.metadata?.items} />
-        <DetailSection label="Raw payload" value={message.metadata?.raw} />
-        <DetailSection label="Error" value={message.metadata?.error} />
       </div>
       <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
     </div>
@@ -1042,30 +1329,6 @@ function MessageBubble({
   message: ChatMessage
   onQuestionOptionSelect: (answer: string, optionId: string) => void
 }) {
-  const [reasoningOpen, setReasoningOpen] = useState(false)
-
-  if (message.type === 'reasoning') {
-    return (
-      <div className={`${styles.message} ${styles.messageAssistant}`}>
-        <div className={styles.reasoningBlock}>
-          <button
-            className={styles.reasoningToggle}
-            onClick={() => setReasoningOpen(!reasoningOpen)}
-          >
-            <span className={`${styles.reasoningArrow} ${reasoningOpen ? styles.reasoningArrowOpen : ''}`}>
-              &#x25B6;
-            </span>
-            Reasoning
-          </button>
-          {reasoningOpen && (
-            <div className={styles.reasoningContent}>{message.content}</div>
-          )}
-        </div>
-        <div className={styles.messageTime}>{formatMessageTime(message.timestamp)}</div>
-      </div>
-    )
-  }
-
   if (message.role === 'system' && message.metadata?.lifecycle && !message.metadata?.error) {
     return <LifecycleCard message={message} />
   }
@@ -1077,16 +1340,8 @@ function MessageBubble({
     )
   }
 
-  if (message.type === 'command') {
-    return <CommandCard message={message} />
-  }
-
   if (message.type === 'file-change') {
     return <FileChangeCard message={message} />
-  }
-
-  if (message.type === 'tool-call') {
-    return <ToolCallCard message={message} />
   }
 
   // Regular text messages
@@ -1113,7 +1368,9 @@ function MessageBubble({
   return (
     <div className={`${styles.message} ${roleClass}`}>
       {isUser ? (
-        <div className={`${styles.bubble} ${styles.bubbleUser}`}>{message.content}</div>
+        <div className={`${styles.bubble} ${styles.bubbleUser}`}>
+          <div className={`${styles.assistantText} ${styles.userText}`}>{renderAssistantMarkdown(message.content)}</div>
+        </div>
       ) : (
         <div className={styles.assistantText}>{renderAssistantMarkdown(message.content)}</div>
       )}
@@ -1171,7 +1428,14 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const [pendingSendPayload, setPendingSendPayload] = useState<PendingSendPayload | null>(null)
   const [resolvingBranchConflict, setResolvingBranchConflict] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPromptPayload[]>(
+    () => queuedPromptsByThread.get(threadId) ?? [],
+  )
+  const [waitingForInput, setWaitingForInput] = useState(false)
+  const [cancelInFlight, setCancelInFlight] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
+  const [autoFollowMessages, setAutoFollowMessages] = useState(true)
+  const [hasUnseenMessages, setHasUnseenMessages] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1183,6 +1447,65 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   const activeTurnHasItemsRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
   const branchLockKeyRef = useRef<string | null>(null)
+  const hasInitializedMessageScrollRef = useRef(false)
+  const lastMessageVersionRef = useRef('')
+
+  const messageBlocks = useMemo<ChatRenderBlock[]>(() => {
+    const blocks: ChatRenderBlock[] = []
+    let timelineBatch: ChatMessage[] = []
+
+    const flushTimelineBatch = () => {
+      if (timelineBatch.length === 0) return
+      blocks.push({ kind: 'tool-group', messages: timelineBatch })
+      timelineBatch = []
+    }
+
+    for (const message of messages) {
+      if (isToolTimelineMessage(message)) {
+        timelineBatch.push(message)
+        continue
+      }
+
+      flushTimelineBatch()
+      blocks.push({ kind: 'message', message })
+    }
+
+    flushTimelineBatch()
+    return blocks
+  }, [messages])
+
+  const messageUpdateVersion = useMemo(() => {
+    const lastMessage = messages[messages.length - 1]
+    return [
+      messages.length,
+      lastMessage?.id ?? '',
+      lastMessage?.timestamp ?? 0,
+      loading ? 1 : 0,
+    ].join(':')
+  }, [messages, loading])
+
+  const nextQueuedPrompt = queuedPrompts[0] ?? null
+  const queuePreview = nextQueuedPrompt ? queuePreviewText(nextQueuedPrompt) : ''
+  const queuedCount = queuedPrompts.length
+  const additionalQueuedCount = Math.max(queuedCount - 1, 0)
+  const queueBarVisible = queuedCount > 0
+  const queueStatusLabel = waitingForInput
+    ? 'Waiting for input'
+    : (loading || cancelInFlight)
+      ? 'Agent running'
+      : 'Queue ready'
+
+  useEffect(() => {
+    setQueuedPrompts(queuedPromptsByThread.get(threadId) ?? [])
+  }, [threadId])
+
+  useEffect(() => {
+    if (queuedPrompts.length > 0) {
+      queuedPromptsByThread.set(threadId, queuedPrompts)
+      return
+    }
+    queuedPromptsByThread.delete(threadId)
+  }, [threadId, queuedPrompts])
 
   useEffect(() => {
     const appendPrompt = (prompt: string) => {
@@ -1573,16 +1896,65 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`
   }, [input])
 
-  // Auto-scroll to bottom on new content and while loading.
+  const isNearBottom = useCallback((container: HTMLDivElement): boolean => {
+    const distanceToBottom = container.scrollHeight - (container.scrollTop + container.clientHeight)
+    return distanceToBottom <= AUTO_SCROLL_THRESHOLD_PX
+  }, [])
+
+  const scrollToLatest = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    container.scrollTo({ top: container.scrollHeight, behavior })
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' })
+    setAutoFollowMessages(true)
+    setHasUnseenMessages(false)
+  }, [])
+
   useEffect(() => {
-    const el = messagesContainerRef.current
-    if (!el) return
-    const raf = requestAnimationFrame(() => {
-      el.scrollTop = el.scrollHeight
-      messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+    hasInitializedMessageScrollRef.current = false
+    lastMessageVersionRef.current = ''
+    setAutoFollowMessages(true)
+    setHasUnseenMessages(false)
+  }, [threadId])
+
+  // Auto-follow only while user is near the bottom. If user scrolls up, keep
+  // the viewport stable and show a "jump to latest" affordance.
+  useEffect(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const hasVersionChanged = lastMessageVersionRef.current !== messageUpdateVersion
+    lastMessageVersionRef.current = messageUpdateVersion
+
+    if (!hasInitializedMessageScrollRef.current) {
+      hasInitializedMessageScrollRef.current = true
+      scrollToLatest('auto')
+      return
+    }
+    if (!hasVersionChanged) return
+
+    if (autoFollowMessages || isNearBottom(container)) {
+      scrollToLatest('auto')
+      return
+    }
+
+    setHasUnseenMessages(true)
+  }, [messageUpdateVersion, autoFollowMessages, isNearBottom, scrollToLatest])
+
+  const handleMessagesScroll = useCallback(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const nearBottom = isNearBottom(container)
+    setAutoFollowMessages((current) => (current === nearBottom ? current : nearBottom))
+    if (nearBottom) {
+      setHasUnseenMessages(false)
+    }
+  }, [isNearBottom])
+
+  const handleJumpToLatest = useCallback(() => {
+    requestAnimationFrame(() => {
+      scrollToLatest('smooth')
     })
-    return () => cancelAnimationFrame(raf)
-  }, [messages, loading])
+  }, [scrollToLatest])
 
   useEffect(() => {
     let cancelled = false
@@ -1747,12 +2119,16 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         updateThreadStatusAndLock('running')
         return
       }
 
       if (phase === 'turn.waiting_input') {
         setLoading(false)
+        setWaitingForInput(true)
+        setCancelInFlight(false)
         updateThreadStatusAndLock('waiting')
         const waitingMessage = mapChatEventToMessage({
           data: typedData,
@@ -1782,6 +2158,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
           if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
             setLoading(false)
+            setWaitingForInput(true)
             updateThreadStatusAndLock('waiting')
             notifyInactiveChatTab('waiting_input')
           }
@@ -1794,9 +2171,10 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         } else if (typedData.type === 'unknown_item') {
           const raw = toRecord(typedData.raw)
           if (raw) {
-            const interactiveQuestion = parseInteractiveQuestionPayload(raw)
+            const interactiveQuestion = extractInteractiveQuestionFromValue(raw)
             if (interactiveQuestion) {
               setLoading(false)
+              setWaitingForInput(true)
               updateThreadStatusAndLock('waiting')
               notifyInactiveChatTab('waiting_input')
               msg = {
@@ -1816,6 +2194,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('completed')
         const completionMessage = mapChatEventToMessage({
@@ -1833,6 +2213,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         }
       } else if (phase === 'turn.cancelled') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('idle')
         const cancelledMessage = mapChatEventToMessage({
@@ -1846,6 +2228,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         }
       } else if (phase === 'turn.failed' || phase === 'error') {
         setLoading(false)
+        setWaitingForInput(false)
+        setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
         updateThreadStatusAndLock('idle')
         const failureMessage = mapChatEventToMessage({
@@ -1865,10 +2249,11 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           : toRecord(typedData)
 
         const interactiveQuestion = topLevelPayload
-          ? parseInteractiveQuestionPayload(topLevelPayload)
+          ? extractInteractiveQuestionFromValue(topLevelPayload)
           : null
         if (interactiveQuestion) {
           setLoading(false)
+          setWaitingForInput(true)
           updateThreadStatusAndLock('waiting')
           notifyInactiveChatTab('waiting_input')
           appendChatMessage({
@@ -1923,6 +2308,48 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     }
   }, [setCodexLoggedIn])
 
+  const clearComposerDraft = useCallback(() => {
+    setInput('')
+    setAttachedImages([])
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }, [])
+
+  const enqueuePrompt = useCallback((payload: Omit<QueuedPromptPayload, 'id' | 'createdAt'>, prioritize = false) => {
+    setQueuedPrompts((prev) => {
+      const nextPayload: QueuedPromptPayload = {
+        id: crypto.randomUUID(),
+        createdAt: Date.now(),
+        ...payload,
+      }
+      const nextQueue = prioritize
+        ? [nextPayload, ...prev]
+        : [...prev, nextPayload]
+
+      if (nextQueue.length <= MAX_QUEUED_PROMPTS) return nextQueue
+      addToast({
+        id: crypto.randomUUID(),
+        message: `Queue is full (${MAX_QUEUED_PROMPTS}). Oldest queued message was dropped.`,
+        type: 'info',
+      })
+      return nextQueue.slice(nextQueue.length - MAX_QUEUED_PROMPTS)
+    })
+  }, [addToast])
+
+  const enqueueCurrentDraft = useCallback((prioritize = false): boolean => {
+    const trimmed = input.trim()
+    if (!trimmed && attachedImages.length === 0) return false
+
+    enqueuePrompt({
+      text: input,
+      mode: sessionMode,
+      images: attachedImages.map((image) => ({ ...image })),
+    }, prioritize)
+    clearComposerDraft()
+    return true
+  }, [input, attachedImages, sessionMode, enqueuePrompt, clearComposerDraft])
+
   const handleSend = useCallback(async (overrides?: {
     text?: string
     mode?: SessionMode
@@ -1932,7 +2359,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     const text = overrides?.text ?? input
     const images = overrides?.images ?? attachedImages
     const trimmed = text.trim()
-    if ((!trimmed && images.length === 0) || !worktreePath) return
+    if ((!trimmed && images.length === 0) || !worktreePath) return false
 
     const effectiveMode = overrides?.mode ?? sessionMode
 
@@ -1949,7 +2376,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         if (statusConflict && !overrides?.forceTakeover) {
           setPendingSendPayload(pendingPayload)
           setBranchConflict(statusConflict)
-          return
+          return false
         }
 
         if (overrides?.forceTakeover) {
@@ -1972,7 +2399,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           if (!lockResult.acquired) {
             setPendingSendPayload(pendingPayload)
             setBranchConflict(enrichBranchConflict(lockResult.conflict))
-            return
+            return false
           }
 
           branchLockKeyRef.current = lockResult.key
@@ -2028,7 +2455,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             }],
           },
         }))
-        return
+        return false
       }
     }
 
@@ -2050,6 +2477,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     setInput('')
     setAttachedImages([])
     setLoading(true)
+    setWaitingForInput(false)
+    setCancelInFlight(false)
     updateThreadStatusAndLock('running')
 
     // Auto-resize textarea
@@ -2077,6 +2506,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       await window.api.chat.send(realThreadIdRef.current!, sendInput)
     } catch (err) {
       setLoading(false)
+      setWaitingForInput(false)
+      setCancelInFlight(false)
       updateThreadStatusAndLock('idle')
       useAppStore.setState((s) => ({
         chatMessages: {
@@ -2091,7 +2522,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           }],
         },
       }))
+      return true
     }
+    return true
   }, [
     input,
     worktreePath,
@@ -2110,6 +2543,79 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     releaseOwnedBranchLock,
     updateThreadStatusAndLock,
   ])
+
+  const handlePrimarySend = useCallback(() => {
+    if (loading || cancelInFlight) {
+      void enqueueCurrentDraft()
+      return
+    }
+    void handleSend()
+  }, [loading, cancelInFlight, enqueueCurrentDraft, handleSend])
+
+  const handleSendQueuedNow = useCallback(() => {
+    if (!nextQueuedPrompt) return
+
+    if (waitingForInput) {
+      addToast({
+        id: crypto.randomUUID(),
+        message: 'Answer the current question first. Queued messages are paused.',
+        type: 'info',
+      })
+      return
+    }
+
+    if (loading || cancelInFlight) {
+      setCancelInFlight(true)
+      if (realThreadIdRef.current) {
+        window.api.chat.cancel(realThreadIdRef.current)
+      } else {
+        setCancelInFlight(false)
+      }
+      setLoading(false)
+      updateThreadStatusAndLock('idle')
+      return
+    }
+
+    void (async () => {
+      const accepted = await handleSend({
+        text: nextQueuedPrompt.text,
+        mode: nextQueuedPrompt.mode,
+        images: nextQueuedPrompt.images,
+      })
+      if (!accepted) return
+      setQueuedPrompts((prev) => prev.filter((entry) => entry.id !== nextQueuedPrompt.id))
+    })()
+  }, [
+    nextQueuedPrompt,
+    waitingForInput,
+    loading,
+    cancelInFlight,
+    addToast,
+    updateThreadStatusAndLock,
+    handleSend,
+  ])
+
+  useEffect(() => {
+    if (loading || waitingForInput || cancelInFlight || queuedPrompts.length === 0) return
+    if (branchConflict || pendingSendPayload) return
+
+    const next = queuedPrompts[0]
+    if (!next) return
+    if (!next.text.trim() && next.images.length === 0) {
+      setQueuedPrompts((prev) => prev.slice(1))
+      return
+    }
+
+    void (async () => {
+      const accepted = await handleSend({
+        text: next.text,
+        mode: next.mode,
+        images: next.images,
+      })
+      if (!accepted) return
+      setQueuedPrompts((prev) => prev.filter((entry) => entry.id !== next.id))
+    })()
+  }, [loading, waitingForInput, cancelInFlight, queuedPrompts, branchConflict, pendingSendPayload, handleSend])
 
   const handleQuestionOptionSelect = useCallback((answer: string, optionId: string) => {
     setLoading(false)
@@ -2146,10 +2652,14 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   }, [handleSend, resetRuntimeThreadState])
 
   const handleCancel = useCallback(() => {
+    setCancelInFlight(true)
     if (realThreadIdRef.current) {
       window.api.chat.cancel(realThreadIdRef.current)
+    } else {
+      setCancelInFlight(false)
     }
     setLoading(false)
+    setWaitingForInput(false)
     updateThreadStatusAndLock('idle')
   }, [updateThreadStatusAndLock])
 
@@ -2163,9 +2673,9 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSend()
+      handlePrimarySend()
     }
-  }, [handleSend, resetRuntimeThreadState])
+  }, [handlePrimarySend, resetRuntimeThreadState])
 
   const handleTextareaInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
@@ -2433,15 +2943,31 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           </div>
         </div>
       ) : (
-        <div className={styles.messages} ref={messagesContainerRef}>
-          {messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              onQuestionOptionSelect={handleQuestionOptionSelect}
-            />
+        <div className={styles.messages} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+          {messageBlocks.map((block) => (
+            block.kind === 'tool-group' ? (
+              <ToolTimelineGroup
+                key={`tool-group:${block.messages[0]!.id}:${block.messages[block.messages.length - 1]!.id}`}
+                messages={block.messages}
+              />
+            ) : (
+              <MessageBubble
+                key={block.message.id}
+                message={block.message}
+                onQuestionOptionSelect={handleQuestionOptionSelect}
+              />
+            )
           ))}
           {loading && <LoadingIndicator />}
+          {hasUnseenMessages && (
+            <button
+              type="button"
+              className={styles.jumpToLatestButton}
+              onClick={handleJumpToLatest}
+            >
+              Jump to latest
+            </button>
+          )}
           <div ref={messagesEndRef} />
         </div>
       )}
@@ -2450,6 +2976,30 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         {sessionMode === 'plan' && (
           <div className={styles.planModeBanner}>
             Plan mode active
+          </div>
+        )}
+        {queueBarVisible && (
+          <div className={styles.queueBar}>
+            <div className={styles.queueBarTextBlock}>
+              <span className={styles.queueBarStatus}>{queueStatusLabel}</span>
+              {nextQueuedPrompt && <span className={styles.queueBarText}>{queuePreview}</span>}
+            </div>
+            <div className={styles.queueBarActions}>
+              {additionalQueuedCount > 0 && (
+                <span className={styles.queueBarCount}>+{additionalQueuedCount}</span>
+              )}
+              <button
+                type="button"
+                className={styles.queueBarSendBtn}
+                onClick={handleSendQueuedNow}
+                disabled={!nextQueuedPrompt}
+                title={loading || cancelInFlight ? 'Stop current turn and send next' : 'Send queued message now'}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+                  <path d="M2 7h8.1l-2.8-2.8 1.1-1.1L13 7l-4.7 3.9-1.1-1.1L10.1 7H2z" />
+                </svg>
+              </button>
+            </div>
           </div>
         )}
         <div
@@ -2467,7 +3017,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
             onPaste={handlePaste}
             placeholder={sessionMode === 'plan' ? 'Ask for a plan... (Shift+Tab to toggle)' : 'Ask the agent...'}
             rows={1}
-            disabled={loading}
+            disabled={cancelInFlight}
           />
 
           {/* Image preview row */}
@@ -2542,19 +3092,31 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
             {/* Send / Stop button */}
             {loading ? (
-              <button
-                className={`${styles.sendBtn} ${styles.sendBtnStop}`}
-                onClick={handleCancel}
-                title="Stop"
-              >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-                  <rect x="2" y="2" width="10" height="10" rx="1.5" />
-                </svg>
-              </button>
+              <>
+                <button
+                  className={`${styles.sendBtn} ${styles.sendBtnQueue}`}
+                  onClick={handlePrimarySend}
+                  disabled={!input.trim() && attachedImages.length === 0}
+                  title="Queue message"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                    <path d="M7 1.5v9M3.5 5L7 1.5 10.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                  </svg>
+                </button>
+                <button
+                  className={`${styles.sendBtn} ${styles.sendBtnStop}`}
+                  onClick={handleCancel}
+                  title="Stop"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                    <rect x="2" y="2" width="10" height="10" rx="1.5" />
+                  </svg>
+                </button>
+              </>
             ) : (
               <button
                 className={styles.sendBtn}
-                onClick={handleSend}
+                onClick={handlePrimarySend}
                 disabled={!input.trim() && attachedImages.length === 0}
                 title="Send message"
               >

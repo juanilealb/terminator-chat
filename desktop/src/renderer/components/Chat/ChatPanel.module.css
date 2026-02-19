@@ -92,7 +92,7 @@
   border-radius: 0;
   border-bottom-right-radius: 0;
   padding: 0;
-  text-align: right;
+  text-align: left;
 }
 
 .bubbleAssistant {
@@ -115,6 +115,10 @@
   line-height: var(--leading-relaxed);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.userText {
+  text-align: left;
 }
 
 .markdownRoot {
@@ -382,12 +386,18 @@
   color: var(--text-secondary);
 }
 
-.fileChangeKind {
-  font-size: var(--font-size-xs);
-  font-weight: var(--weight-semibold);
-  padding: 1px 6px;
+.fileChangeSign {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-bold);
   border-radius: var(--radius-sm);
-  text-transform: uppercase;
+}
+
+.fileChangePath {
+  color: var(--text-secondary);
 }
 
 .fileChangeAdd {
@@ -430,6 +440,146 @@
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   padding: var(--space-1) var(--space-3);
+}
+
+.toolTimelineCard {
+  background: color-mix(in srgb, var(--bg-surface) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-muted) 18%, transparent);
+  border-radius: var(--radius-lg);
+  border-bottom-left-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.toolTimelineHeader {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  padding: 7px var(--space-3);
+  background: color-mix(in srgb, var(--bg-surface-hover) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-muted) 14%, transparent);
+}
+
+.toolTimelineLabel {
+  color: color-mix(in srgb, var(--text-tertiary) 78%, transparent);
+  letter-spacing: 0.05em;
+  opacity: 0.66;
+}
+
+.toolTimelineCount {
+  color: color-mix(in srgb, var(--text-tertiary) 82%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  opacity: 0.74;
+}
+
+.toolTimelineList {
+  display: flex;
+  flex-direction: column;
+  padding: 1px 0;
+}
+
+.toolTimelineItem {
+  border-top: 1px solid color-mix(in srgb, var(--border-muted) 14%, transparent);
+}
+
+.toolTimelineItem:first-child {
+  border-top: none;
+}
+
+.toolTimelineItemSummary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 5px var(--space-3);
+  user-select: none;
+  opacity: 0.7;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+
+.toolTimelineItemSummary::-webkit-details-marker {
+  display: none;
+}
+
+.toolTimelineItemSummary:hover {
+  background: color-mix(in srgb, var(--bg-surface-hover) 12%, transparent);
+  opacity: 0.88;
+}
+
+.toolTimelineDot {
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.toolTimelineDotSuccess {
+  background: color-mix(in srgb, var(--accent-green) 42%, var(--text-tertiary) 58%);
+}
+
+.toolTimelineDotFail {
+  background: color-mix(in srgb, var(--accent-red) 42%, var(--text-tertiary) 58%);
+}
+
+.toolTimelineDotRunning {
+  background: color-mix(in srgb, var(--accent-blue) 42%, var(--text-tertiary) 58%);
+}
+
+.toolTimelineDotNeutral {
+  background: color-mix(in srgb, var(--text-tertiary) 44%, transparent);
+}
+
+.toolTimelineType {
+  color: color-mix(in srgb, var(--text-tertiary) 58%, transparent);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.toolTimelineTitle {
+  color: color-mix(in srgb, var(--text-secondary) 76%, var(--text-tertiary) 24%);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolTimelineMeta {
+  color: color-mix(in srgb, var(--text-tertiary) 72%, transparent);
+  opacity: 0.56;
+  font-weight: var(--weight-regular);
+}
+
+.toolTimelineSubtitle {
+  color: color-mix(in srgb, var(--text-tertiary) 78%, transparent);
+  font-size: var(--font-size-xs);
+  padding: 0 var(--space-3) var(--space-2);
+  opacity: 0.66;
+}
+
+.toolTimelineToggle {
+  background: transparent;
+  border: none;
+  color: color-mix(in srgb, var(--text-tertiary) 72%, transparent);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  padding: 6px var(--space-3);
+  text-align: left;
+  transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+  opacity: 0.68;
+}
+
+.toolTimelineToggle:hover {
+  background: color-mix(in srgb, var(--bg-surface-hover) 10%, transparent);
+  color: color-mix(in srgb, var(--text-secondary) 74%, transparent);
+  opacity: 0.84;
 }
 
 .lifecycleCard {
@@ -529,6 +679,21 @@
   align-self: flex-start;
 }
 
+.jumpToLatestButton {
+  align-self: center;
+  background: color-mix(in srgb, var(--accent-blue) 24%, var(--bg-surface) 76%);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 45%, var(--border-muted) 55%);
+  border-radius: 999px;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  padding: 4px 12px;
+  position: sticky;
+  bottom: var(--space-2);
+  z-index: 2;
+}
+
 .loadingDot {
   width: 6px;
   height: 6px;
@@ -565,6 +730,87 @@
   font-weight: var(--weight-regular);
   margin: 0 0 var(--space-2);
   padding: 0;
+}
+
+.queueBar {
+  align-items: center;
+  background: color-mix(in srgb, var(--bg-surface) 86%, #ffffff 14%);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-lg);
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+  min-height: 30px;
+  padding: 4px var(--space-2);
+}
+
+.queueBarTextBlock {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.queueBarStatus {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  flex-shrink: 0;
+}
+
+.queueBarText {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queueBarActions {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.queueBarCount {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent-blue) 24%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 45%, var(--border-muted));
+  border-radius: 999px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  height: 18px;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0 6px;
+}
+
+.queueBarSendBtn {
+  align-items: center;
+  background: var(--accent-blue);
+  border: none;
+  border-radius: 999px;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  padding: 0 8px;
+  transition: background var(--transition-fast), opacity var(--transition-fast);
+}
+
+.queueBarSendBtn:hover:not(:disabled) {
+  background: var(--accent-blue-dim);
+}
+
+.queueBarSendBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .inputContainer {
@@ -989,6 +1235,10 @@
 
 .sendBtnStop:hover {
   background: #e85560;
+}
+
+.sendBtnQueue {
+  background: var(--accent-blue);
 }
 
 /* Drag overlay */
