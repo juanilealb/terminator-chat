@@ -555,6 +555,25 @@ function looksInteractiveQuestionText(content: string): boolean {
   return trimmed.includes('?') && /\n\s*(?:[>\u203a]\s*)?1\.\s+/.test(trimmed)
 }
 
+function looksLikeQuestionPromptText(content: string): boolean {
+  const normalized = content.replace(/\r/g, '').trim()
+  if (!normalized) return false
+  if (looksInteractiveQuestionText(normalized)) return true
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (lines.length === 0) return false
+
+  // Heuristic for plain-language clarifying questions without option blocks.
+  const hasQuestionMark = /[?？]/.test(normalized) || normalized.startsWith('¿')
+  if (!hasQuestionMark) return false
+  if (lines.length === 1) return true
+  return lines.length <= 3 && normalized.length <= 220
+}
+
 function parseInteractiveQuestionText(content: string): ParsedInteractiveQuestion | null {
   const lines = content
     .replace(/\r/g, '')
@@ -1519,6 +1538,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
   // Guard against SDK item-id reuse across turns. We scope all item ids by turn.
   const eventTurnSequenceRef = useRef(0)
   const activeTurnHasItemsRef = useRef(false)
+  const activeTurnHasPlanContentRef = useRef(false)
+  const activeTurnHasQuestionPromptRef = useRef(false)
   const hiddenThreadToastDedupeRef = useRef(new Map<string, number>())
   const branchLockKeyRef = useRef<string | null>(null)
   const terminalSessionRef = useRef<string | null>(null)
@@ -2323,6 +2344,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         void window.api.terminal.disposeSession(previousTerminalSessionId).catch(() => {})
         terminalSessionRef.current = null
       }
+      activeTurnHasPlanContentRef.current = false
+      activeTurnHasQuestionPromptRef.current = false
       updateThreadStatusAndLock('idle')
       releaseOwnedBranchLock()
     }
@@ -2440,6 +2463,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           eventTurnSequenceRef.current += 1
         }
         activeTurnHasItemsRef.current = false
+        activeTurnHasPlanContentRef.current = false
+        activeTurnHasQuestionPromptRef.current = false
         setWaitingForInput(false)
         setCancelInFlight(false)
         updateThreadStatusAndLock('running')
@@ -2447,6 +2472,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
       }
 
       if (phase === 'turn.waiting_input') {
+        activeTurnHasQuestionPromptRef.current = true
         setLoading(false)
         setWaitingForInput(true)
         setCancelInFlight(false)
@@ -2477,11 +2503,18 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
         if (typedData.type === 'agent_message') {
           const parsedTextQuestion = parseInteractiveQuestionText(typedData.text)
-          if (parsedTextQuestion || looksInteractiveQuestionText(typedData.text)) {
+          const hasInteractiveQuestion = parsedTextQuestion || looksInteractiveQuestionText(typedData.text)
+          const hasQuestionPrompt = hasInteractiveQuestion || looksLikeQuestionPromptText(typedData.text)
+          if (hasQuestionPrompt) {
+            activeTurnHasQuestionPromptRef.current = true
+          }
+          if (hasInteractiveQuestion) {
             setLoading(false)
             setWaitingForInput(true)
             updateThreadStatusAndLock('waiting')
             notifyInactiveChatTab('waiting_input')
+          } else if (!hasQuestionPrompt && typedData.text.trim().length > 0) {
+            activeTurnHasPlanContentRef.current = true
           }
           if (msg && parsedTextQuestion) {
             msg = {
@@ -2494,6 +2527,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           if (raw) {
             const interactiveQuestion = extractInteractiveQuestionFromValue(raw)
             if (interactiveQuestion) {
+              activeTurnHasQuestionPromptRef.current = true
               setLoading(false)
               setWaitingForInput(true)
               updateThreadStatusAndLock('waiting')
@@ -2514,10 +2548,15 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
 
         if (msg) appendChatMessage(msg)
       } else if (phase === 'turn.completed') {
+        const shouldShowPlanCompletionCard = sessionMode === 'plan'
+          && activeTurnHasPlanContentRef.current
+          && !activeTurnHasQuestionPromptRef.current
         setLoading(false)
         setWaitingForInput(false)
         setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
+        activeTurnHasPlanContentRef.current = false
+        activeTurnHasQuestionPromptRef.current = false
         updateThreadStatusAndLock('completed')
         const completionMessage = mapChatEventToMessage({
           data: typedData,
@@ -2529,7 +2568,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           appendChatMessage(completionMessage)
         }
         notifyInactiveChatTab('completed')
-        if (sessionMode === 'plan') {
+        if (shouldShowPlanCompletionCard) {
           appendPlanCompletionCard(eventTurnId)
         }
       } else if (phase === 'turn.cancelled') {
@@ -2537,6 +2576,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         setWaitingForInput(false)
         setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
+        activeTurnHasPlanContentRef.current = false
+        activeTurnHasQuestionPromptRef.current = false
         updateThreadStatusAndLock('idle')
         const cancelledMessage = mapChatEventToMessage({
           data: typedData,
@@ -2552,6 +2593,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         setWaitingForInput(false)
         setCancelInFlight(false)
         activeTurnHasItemsRef.current = false
+        activeTurnHasPlanContentRef.current = false
+        activeTurnHasQuestionPromptRef.current = false
         updateThreadStatusAndLock('idle')
         const failureMessage = mapChatEventToMessage({
           data: typedData,
@@ -2573,6 +2616,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
           ? extractInteractiveQuestionFromValue(topLevelPayload)
           : null
         if (interactiveQuestion) {
+          activeTurnHasQuestionPromptRef.current = true
           setLoading(false)
           setWaitingForInput(true)
           updateThreadStatusAndLock('waiting')
@@ -2763,6 +2807,8 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
         isFirstMessageInThread = true
         eventTurnSequenceRef.current = 0
         activeTurnHasItemsRef.current = false
+        activeTurnHasPlanContentRef.current = false
+        activeTurnHasQuestionPromptRef.current = false
       } catch (err) {
         releaseOwnedBranchLock()
         useAppStore.setState((s) => ({

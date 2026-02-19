@@ -151,6 +151,21 @@ async function installMockChatBackend(app: ElectronApplication): Promise<void> {
         pendingTurns.delete(threadId)
       }
 
+      const completeTurnWithoutAssistant = () => {
+        const latest = pendingTurns.get(threadId)
+        if (!latest || latest.turnId !== turnId || latest.completed) return
+        safeEmit('turn.completed', 'turn.completed', {
+          type: 'turn.completed',
+          usage: {
+            input_tokens: 120,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+          },
+        })
+        latest.completed = true
+        pendingTurns.delete(threadId)
+      }
+
       if (normalized.includes('long task')) {
         pending.timerIds.push(setTimeout(() => {
           safeEmit('item.started', 'item.delta', {
@@ -187,6 +202,14 @@ async function installMockChatBackend(app: ElectronApplication): Promise<void> {
             ].join('\n'),
           })
           safeEmit('turn.waiting_input', 'turn.waiting_input', { type: 'turn.waiting_input' })
+        }, 140))
+      } else if (normalized.includes('empty plan')) {
+        pending.timerIds.push(setTimeout(() => {
+          completeTurnWithoutAssistant()
+        }, 140))
+      } else if (normalized.includes('plain question')) {
+        pending.timerIds.push(setTimeout(() => {
+          completeTurn('Can you confirm the scope?')
         }, 140))
       } else {
         pending.timerIds.push(setTimeout(() => {
@@ -360,6 +383,41 @@ test.describe('Chat runtime flows', () => {
 
       await window.locator('button[aria-label="Back to workspace"]').click()
       await expect(window.getByText('long task while settings open').first()).toBeVisible({ timeout: 12000 })
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('plan completion card appears only after real plan content', async () => {
+    const { app, window } = await launchApp()
+
+    try {
+      await installMockChatBackend(app)
+      await setupChatWorkspace(window, 'plan-completion-guard')
+
+      const input = window.locator('textarea[placeholder="Ask the agent..."]').first()
+      await expect(input).toBeVisible({ timeout: 20000 })
+
+      await input.click()
+      await window.keyboard.down('Shift')
+      await window.keyboard.press('Tab')
+      await window.keyboard.up('Shift')
+      const planInput = window.locator('textarea[placeholder="Ask for a plan... (Shift+Tab to toggle)"]').first()
+      await expect(planInput).toBeVisible()
+
+      await planInput.fill('empty plan')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+      await expect(window.locator('text=The plan is ready. What should I do next?')).toHaveCount(0, { timeout: 4000 })
+
+      await planInput.fill('plain question')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+      await expect(window.locator('text=Can you confirm the scope?')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=The plan is ready. What should I do next?')).toHaveCount(0)
+
+      await planInput.fill('real plan please')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+      await expect(window.locator('text=Done:')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=The plan is ready. What should I do next?')).toBeVisible({ timeout: 10000 })
     } finally {
       await app.close()
     }
