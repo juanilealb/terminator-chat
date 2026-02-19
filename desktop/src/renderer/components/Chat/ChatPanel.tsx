@@ -3062,9 +3062,13 @@ export function ChatPanel({ threadId, workspaceId, worktreePath }: ChatPanelProp
     updateThreadStatusAndLock('idle')
   }, [updateThreadStatusAndLock])
 
+  const isShiftTabShortcut = (e: React.KeyboardEvent<HTMLTextAreaElement>): boolean =>
+    e.shiftKey && (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9)
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Tab' && e.shiftKey) {
+    if (isShiftTabShortcut(e)) {
       e.preventDefault()
+      e.stopPropagation()
       setSessionMode((current) => (current === 'chat' ? 'plan' : 'chat'))
       resetRuntimeThreadState()
       return
