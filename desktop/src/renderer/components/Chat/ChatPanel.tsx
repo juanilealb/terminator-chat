@@ -117,6 +117,8 @@ interface ParsedInteractiveQuestion {
   footer?: string
 }
 
+type ChatMcpToolCallData = Extract<ChatEventData, { type: 'mcp_tool_call' }>
+
 const PLAN_ACTION_EXECUTE_ID = 'plan-execute-now'
 const PLAN_ACTION_REFINE_ID = 'plan-refine'
 const PLAN_ACTION_EXECUTE_LABEL = 'Start implementation now'
@@ -148,6 +150,7 @@ const QUESTION_HEADER_RE = /^question\s+\d+\/\d+/i
 const QUESTION_OPTION_RE = /^(?:[>\u203a]\s*)?(\d+)\.\s+(.+)$/
 const QUESTION_FOOTER_RE = /(tab to add notes|enter to submit answer|esc to interrupt)/i
 const TOOL_TIMELINE_PREVIEW_LIMIT = 10
+const FILE_CHANGE_PATCH_PREVIEW_LINES = 50
 const AUTO_SCROLL_THRESHOLD_PX = 72
 const MAX_QUEUED_PROMPTS = 20
 const BRANCH_EXECUTION_LOCK_TTL_MS = 5 * 60 * 1000
@@ -481,6 +484,21 @@ function parseInteractiveQuestionMetadata(metadata: Record<string, unknown> | un
     options,
     footer: pickTrimmedText(payload, 'footer') ?? undefined,
   }
+}
+
+function isRequestUserInputToolCall(data: ChatEventData): data is ChatMcpToolCallData {
+  return data.type === 'mcp_tool_call'
+    && data.tool.trim().toLowerCase() === 'request_user_input'
+}
+
+function parseInteractiveQuestionFromRequestToolCall(data: ChatMcpToolCallData): ParsedInteractiveQuestion | null {
+  const fromArguments = extractInteractiveQuestionFromValue(data.arguments)
+  if (fromArguments) return fromArguments
+
+  const fromStructuredResult = extractInteractiveQuestionFromValue(data.result?.structured_content)
+  if (fromStructuredResult) return fromStructuredResult
+
+  return extractInteractiveQuestionFromValue(data.result)
 }
 
 function isThreadItemData(data: ChatEventData): data is ChatThreadItemData {
@@ -1294,30 +1312,172 @@ type ChatRenderBlock =
   | { kind: 'message'; message: ChatMessage }
   | { kind: 'tool-group'; messages: ChatMessage[] }
 
-function FileChangeCard({ message }: { message: ChatMessage }) {
+interface FileDiffPreview {
+  text: string
+  hiddenLineCount: number
+  truncated: boolean
+}
+
+interface FilePatchState {
+  status: 'loading' | 'ready' | 'error'
+  patch: string
+  error?: string
+}
+
+function createPatchPreview(patch: string): FileDiffPreview {
+  const normalized = patch.replace(/\r/g, '')
+  const lines = normalized.split('\n')
+  if (lines.length <= FILE_CHANGE_PATCH_PREVIEW_LINES) {
+    return {
+      text: normalized,
+      hiddenLineCount: 0,
+      truncated: false,
+    }
+  }
+
+  return {
+    text: lines.slice(0, FILE_CHANGE_PATCH_PREVIEW_LINES).join('\n'),
+    hiddenLineCount: lines.length - FILE_CHANGE_PATCH_PREVIEW_LINES,
+    truncated: true,
+  }
+}
+
+function FileChangeCard({ message, worktreePath }: { message: ChatMessage; worktreePath?: string }) {
   const changes = (message.metadata?.changes as Array<{ path: string; kind: string }> | undefined) ?? []
+  const [patchesByPath, setPatchesByPath] = useState<Record<string, FilePatchState>>({})
+  const [expandedPatchPaths, setExpandedPatchPaths] = useState<Record<string, boolean>>({})
+
+  const uniquePaths = useMemo(() => {
+    const seen = new Set<string>()
+    const normalized: string[] = []
+    for (const change of changes) {
+      const path = change.path.trim()
+      if (!path || seen.has(path)) continue
+      seen.add(path)
+      normalized.push(path)
+    }
+    return normalized
+  }, [changes])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!worktreePath || uniquePaths.length === 0) {
+      setPatchesByPath({})
+      setExpandedPatchPaths({})
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setPatchesByPath((prev) => {
+      const next: Record<string, FilePatchState> = {}
+      for (const path of uniquePaths) {
+        next[path] = prev[path] ?? {
+          status: 'loading',
+          patch: '',
+        }
+      }
+      return next
+    })
+    setExpandedPatchPaths({})
+
+    void Promise.all(uniquePaths.map(async (path) => {
+      try {
+        const patch = await window.api.git.getFileDiff(worktreePath, path)
+        if (cancelled) return
+        setPatchesByPath((prev) => ({
+          ...prev,
+          [path]: {
+            status: 'ready',
+            patch: patch ?? '',
+          },
+        }))
+      } catch (err) {
+        if (cancelled) return
+        setPatchesByPath((prev) => ({
+          ...prev,
+          [path]: {
+            status: 'error',
+            patch: '',
+            error: formatUserError(err, 'Unable to load diff'),
+          },
+        }))
+      }
+    }))
+
+    return () => {
+      cancelled = true
+    }
+  }, [worktreePath, uniquePaths])
+
+  const toggleExpandedPatch = useCallback((path: string) => {
+    setExpandedPatchPaths((prev) => ({
+      ...prev,
+      [path]: !prev[path],
+    }))
+  }, [])
+
   return (
     <div className={`${styles.message} ${styles.messageAssistant}`}>
       <div className={styles.fileChangeBlock}>
         <div className={styles.fileChangeHeader}>File changes ({changes.length})</div>
         {changes.length > 0 ? (
           <div className={styles.fileChangeList}>
-            {changes.map((change) => (
-              <div key={`${change.kind}:${change.path}`} className={styles.fileChangeItem}>
-                <span
-                  className={`${styles.fileChangeSign} ${
-                    change.kind === 'add'
-                      ? styles.fileChangeAdd
-                      : change.kind === 'delete'
-                        ? styles.fileChangeDelete
-                        : styles.fileChangeUpdate
-                  }`}
-                >
-                  {change.kind === 'add' ? '+' : change.kind === 'delete' ? '-' : '~'}
-                </span>
-                <span className={styles.fileChangePath}>{change.path}</span>
-              </div>
-            ))}
+            {changes.map((change) => {
+              const normalizedPath = change.path.trim()
+              const patchState = patchesByPath[normalizedPath]
+              let patchContent: ReactNode = null
+              if (!worktreePath) {
+                patchContent = <span className={styles.fileChangePatchHint}>Open this thread in a workspace to preview diffs.</span>
+              } else if (!patchState || patchState.status === 'loading') {
+                patchContent = <span className={styles.fileChangePatchHint}>Loading diff...</span>
+              } else if (patchState.status === 'error') {
+                patchContent = <span className={styles.fileChangePatchHint}>Diff unavailable: {patchState.error}</span>
+              } else if (!patchState.patch.trim()) {
+                patchContent = <span className={styles.fileChangePatchHint}>No diff available.</span>
+              } else {
+                const preview = createPatchPreview(patchState.patch)
+                const expanded = Boolean(expandedPatchPaths[normalizedPath])
+                const shownPatch = expanded || !preview.truncated ? patchState.patch : preview.text
+                patchContent = (
+                  <div className={styles.fileChangePatchBlock}>
+                    <pre className={styles.fileChangePatch}>{shownPatch}</pre>
+                    {preview.truncated && (
+                      <button
+                        type="button"
+                        className={styles.fileChangePatchToggle}
+                        onClick={() => toggleExpandedPatch(normalizedPath)}
+                      >
+                        {expanded
+                          ? 'Show fewer lines'
+                          : `Show full patch (${preview.hiddenLineCount} more lines)`}
+                      </button>
+                    )}
+                  </div>
+                )
+              }
+
+              return (
+                <div key={`${change.kind}:${change.path}`} className={styles.fileChangeEntry}>
+                  <div className={styles.fileChangeItem}>
+                    <span
+                      className={`${styles.fileChangeSign} ${
+                        change.kind === 'add'
+                          ? styles.fileChangeAdd
+                          : change.kind === 'delete'
+                            ? styles.fileChangeDelete
+                            : styles.fileChangeUpdate
+                      }`}
+                    >
+                      {change.kind === 'add' ? '+' : change.kind === 'delete' ? '-' : '~'}
+                    </span>
+                    <span className={styles.fileChangePath}>{change.path}</span>
+                  </div>
+                  {patchContent}
+                </div>
+              )
+            })}
           </div>
         ) : (
           <div className={styles.reasoningContent}>No file changes reported.</div>
@@ -1410,9 +1570,11 @@ function QuestionCard({
 function MessageBubble({
   message,
   onQuestionOptionSelect,
+  worktreePath,
 }: {
   message: ChatMessage
   onQuestionOptionSelect: (answer: string, optionId: string) => void
+  worktreePath?: string
 }) {
   if (message.role === 'system' && message.metadata?.lifecycle && !message.metadata?.error) {
     return <LifecycleCard message={message} />
@@ -1426,7 +1588,7 @@ function MessageBubble({
   }
 
   if (message.type === 'file-change') {
-    return <FileChangeCard message={message} />
+    return <FileChangeCard message={message} worktreePath={worktreePath} />
   }
 
   // Regular text messages
@@ -2537,6 +2699,27 @@ export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = fals
               metadata: { interactiveQuestion: parsedTextQuestion },
             }
           }
+        } else if (isRequestUserInputToolCall(typedData)) {
+          activeTurnHasQuestionPromptRef.current = true
+          setLoading(false)
+          setWaitingForInput(true)
+          updateThreadStatusAndLock('waiting')
+          notifyInactiveChatTab('waiting_input')
+
+          const interactiveQuestion = parseInteractiveQuestionFromRequestToolCall(typedData)
+          if (interactiveQuestion) {
+            msg = {
+              id: scopedId,
+              role: 'assistant',
+              content: toInteractiveQuestionText(interactiveQuestion),
+              type: 'text',
+              timestamp,
+              metadata: {
+                interactiveQuestion,
+                requestUserInputToolCall: true,
+              },
+            }
+          }
         } else if (typedData.type === 'unknown_item') {
           const raw = toRecord(typedData.raw)
           if (raw) {
@@ -3369,6 +3552,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = fals
                 key={block.message.id}
                 message={block.message}
                 onQuestionOptionSelect={handleQuestionOptionSelect}
+                worktreePath={worktreePath}
               />
             )
           ))}

@@ -310,6 +310,10 @@ function serializeEvent(event: any): ChatEventData {
 }
 
 function looksLikeWaitingInput(data: ChatEventData): boolean {
+  if (data.type === 'mcp_tool_call') {
+    return data.tool.trim().toLowerCase() === 'request_user_input'
+  }
+
   if (data.type !== 'agent_message') return false
   const text = data.text.trim()
   if (!text) return false

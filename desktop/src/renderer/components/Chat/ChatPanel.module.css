@@ -374,7 +374,13 @@
 .fileChangeList {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2);
+}
+
+.fileChangeEntry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .fileChangeItem {
@@ -398,6 +404,50 @@
 
 .fileChangePath {
   color: var(--text-secondary);
+}
+
+.fileChangePatchHint {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  margin-left: 24px;
+}
+
+.fileChangePatchBlock {
+  margin-left: 24px;
+  border: 1px solid color-mix(in srgb, var(--border-muted) 84%, transparent);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-elevated) 82%, #000 18%);
+}
+
+.fileChangePatch {
+  margin: 0;
+  padding: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--text-secondary);
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.fileChangePatchToggle {
+  border: none;
+  width: 100%;
+  text-align: left;
+  background: color-mix(in srgb, var(--bg-surface-hover) 24%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  padding: 6px var(--space-2);
+  border-top: 1px solid color-mix(in srgb, var(--border-muted) 84%, transparent);
+}
+
+.fileChangePatchToggle:hover {
+  background: color-mix(in srgb, var(--bg-surface-hover) 40%, transparent);
 }
 
 .fileChangeAdd {

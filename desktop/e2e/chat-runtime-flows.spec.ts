@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
 import { resolve, join } from 'path'
-import { mkdirSync } from 'fs'
+import { mkdirSync, writeFileSync } from 'fs'
+import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 
 const appPath = resolve(__dirname, '../out/main/index.js')
@@ -211,6 +212,82 @@ async function installMockChatBackend(app: ElectronApplication): Promise<void> {
         pending.timerIds.push(setTimeout(() => {
           completeTurn('Can you confirm the scope?')
         }, 140))
+      } else if (normalized.includes('tool question')) {
+        pending.timerIds.push(setTimeout(() => {
+          const toolId = `tool-${randomUUID()}`
+          safeEmit('item.started', 'item.delta', {
+            type: 'mcp_tool_call',
+            id: toolId,
+            server: 'functions',
+            tool: 'request_user_input',
+            arguments: {
+              questions: [
+                {
+                  header: 'Plan question',
+                  id: 'rollout_mode',
+                  question: 'Pick rollout mode',
+                  options: [
+                    { label: 'Canary', description: 'Gradual rollout by cohort' },
+                    { label: 'Big bang', description: 'Enable for everyone at once' },
+                  ],
+                },
+              ],
+            },
+            status: 'in_progress',
+          })
+          safeEmit('item.completed', 'item.delta', {
+            type: 'mcp_tool_call',
+            id: toolId,
+            server: 'functions',
+            tool: 'request_user_input',
+            arguments: {
+              questions: [
+                {
+                  header: 'Plan question',
+                  id: 'rollout_mode',
+                  question: 'Pick rollout mode',
+                  options: [
+                    { label: 'Canary', description: 'Gradual rollout by cohort' },
+                    { label: 'Big bang', description: 'Enable for everyone at once' },
+                  ],
+                },
+              ],
+            },
+            result: {
+              content: [],
+              structured_content: {
+                questions: [
+                  {
+                    header: 'Plan question',
+                    id: 'rollout_mode',
+                    question: 'Pick rollout mode',
+                    options: [
+                      { label: 'Canary', description: 'Gradual rollout by cohort' },
+                      { label: 'Big bang', description: 'Enable for everyone at once' },
+                    ],
+                  },
+                ],
+              },
+            },
+            status: 'completed',
+          })
+          safeEmit('turn.waiting_input', 'turn.waiting_input', { type: 'turn.waiting_input' })
+        }, 140))
+      } else if (normalized.includes('file change preview')) {
+        pending.timerIds.push(setTimeout(() => {
+          safeEmit('item.completed', 'item.delta', {
+            type: 'file_change',
+            id: `patch-${randomUUID()}`,
+            changes: [
+              {
+                path: 'README.md',
+                kind: 'update',
+              },
+            ],
+            status: 'completed',
+          })
+          completeTurn('Applied file changes')
+        }, 140))
       } else {
         pending.timerIds.push(setTimeout(() => {
           completeTurn(`Done: ${textInput.trim() || 'ok'}`)
@@ -246,6 +323,12 @@ async function setupChatWorkspace(window: Page, repoName: string): Promise<void>
   const worktreePath = join(base, 'ws-1')
   mkdirSync(repoPath, { recursive: true })
   mkdirSync(worktreePath, { recursive: true })
+  writeFileSync(join(worktreePath, 'README.md'), 'initial\n')
+  execFileSync('git', ['init'], { cwd: worktreePath, stdio: 'ignore' })
+  execFileSync('git', ['config', 'user.name', 'Terminator Tests'], { cwd: worktreePath, stdio: 'ignore' })
+  execFileSync('git', ['config', 'user.email', 'terminator-tests@example.com'], { cwd: worktreePath, stdio: 'ignore' })
+  execFileSync('git', ['add', 'README.md'], { cwd: worktreePath, stdio: 'ignore' })
+  execFileSync('git', ['commit', '-m', 'init'], { cwd: worktreePath, stdio: 'ignore' })
 
   await window.evaluate(async ({ repoPath: rp, worktreePath: wp }) => {
     const store = (window as any).__store.getState()
@@ -289,6 +372,8 @@ async function setupChatWorkspace(window: Page, repoName: string): Promise<void>
 }
 
 test.describe('Chat runtime flows', () => {
+  test.describe.configure({ timeout: 60000 })
+
   test('queue pauses on question and resumes after answer', async () => {
     const { app, window } = await launchApp()
 
@@ -414,10 +499,49 @@ test.describe('Chat runtime flows', () => {
       await expect(window.locator('text=Can you confirm the scope?')).toBeVisible({ timeout: 10000 })
       await expect(window.locator('text=The plan is ready. What should I do next?')).toHaveCount(0)
 
+      await planInput.fill('tool question')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+      await expect(window.locator('text=Pick rollout mode')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('button:has-text("Canary")')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=The plan is ready. What should I do next?')).toHaveCount(0)
+
       await planInput.fill('real plan please')
       await window.locator('button[title="Send message"]:not([disabled])').first().click()
       await expect(window.locator('text=Done:')).toBeVisible({ timeout: 10000 })
       await expect(window.locator('text=The plan is ready. What should I do next?')).toBeVisible({ timeout: 10000 })
+    } finally {
+      await app.close()
+    }
+  })
+
+  test('file change card shows diff preview and allows expanding to full patch', async () => {
+    const { app, window } = await launchApp()
+
+    try {
+      await installMockChatBackend(app)
+      await setupChatWorkspace(window, 'file-change-preview')
+
+      const input = window.locator('textarea[placeholder="Ask the agent..."]').first()
+      await expect(input).toBeVisible({ timeout: 20000 })
+
+      await window.evaluate(async () => {
+        const state = (window as any).__store.getState()
+        const workspace = state.workspaces[0]
+        const lines = Array.from({ length: 80 }, (_, idx) => `line ${idx + 1}`).join('\n')
+        await (window as any).api.fs.writeFile(`${workspace.worktreePath}/README.md`, `initial\n${lines}\n`)
+      })
+
+      await input.fill('file change preview')
+      await window.locator('button[title="Send message"]:not([disabled])').first().click()
+
+      await expect(window.locator('[class*="fileChangePath"]', { hasText: 'README.md' })).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=Loading diff...')).toHaveCount(0, { timeout: 10000 })
+      await expect(window.locator('text=Show full patch')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=+line 80')).toHaveCount(0)
+
+      await window.locator('button:has-text("Show full patch")').first().click()
+      await expect(window.locator('text=Show fewer lines')).toBeVisible({ timeout: 10000 })
+      await expect(window.locator('text=+line 80')).toBeVisible({ timeout: 10000 })
     } finally {
       await app.close()
     }
