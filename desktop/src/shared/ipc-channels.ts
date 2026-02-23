@@ -204,6 +204,7 @@ export const IPC = {
   GIT_LIST_SNAPSHOTS: 'git:list-snapshots',
   GIT_RESTORE_SNAPSHOT: 'git:restore-snapshot',
   GIT_DROP_SNAPSHOT: 'git:drop-snapshot',
+  GIT_MOVE_LOCAL_CHANGES: 'git:move-local-changes',
 
   // File operations
   FS_GET_TREE: 'fs:get-tree',
@@ -258,6 +259,7 @@ export const IPC = {
   CHAT_DESTROY_THREAD: 'chat:destroy-thread',
   CHAT_EVENT: 'chat:event',
   CHAT_RESUME: 'chat:resume',
+  CHAT_SAVE_LOCAL_IMAGE: 'chat:save-local-image',
 
   // Integrated terminal
   TERMINAL_CREATE_SESSION: 'terminal:create-session',

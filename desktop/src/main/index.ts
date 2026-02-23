@@ -31,6 +31,7 @@ let waitingForRendererLoad = false
 let themeUpdatedHandler: (() => void) | null = null
 const allowMultiInstance = process.env.CI_TEST === '1' || process.env.TERMINATOR_CHAT_ALLOW_MULTI_INSTANCE === '1'
 const customProfileName = process.env.TERMINATOR_CHAT_PROFILE?.trim()
+const debugRuntimeEnabled = process.env.TERMINATOR_CHAT_DEBUG === '1'
 
 // In dev, Vite requires relaxed CSP directives (`unsafe-eval`) and Electron prints
 // a known warning on every run. Keep production warnings intact.
@@ -251,6 +252,29 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  if (debugRuntimeEnabled) {
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      console.error('[Terminator Chat] did-fail-load', {
+        errorCode,
+        errorDescription,
+        validatedURL,
+        isMainFrame,
+      })
+    })
+
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+      console.error('[Terminator Chat] render-process-gone', details)
+    })
+
+    mainWindow.webContents.on('unresponsive', () => {
+      console.error('[Terminator Chat] renderer became unresponsive')
+    })
+
+    mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      console.log('[Terminator Chat][renderer]', { level, message, line, sourceId })
+    })
+  }
+
   // Load renderer
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -259,7 +283,7 @@ function createWindow(): void {
   }
 
   // Open DevTools in dev mode for debugging
-  if (process.env.ELECTRON_RENDERER_URL) {
+  if (process.env.ELECTRON_RENDERER_URL || debugRuntimeEnabled) {
     mainWindow.webContents.openDevTools()
   }
 
@@ -279,6 +303,10 @@ app.commandLine.appendSwitch('enable-gpu-rasterization')
 app.commandLine.appendSwitch('enable-zero-copy')
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
+if (debugRuntimeEnabled) {
+  app.commandLine.appendSwitch('enable-logging')
+  app.commandLine.appendSwitch('v', '1')
+}
 
 if (customProfileName) {
   const safeProfileName = customProfileName.replace(/[^a-zA-Z0-9_-]/g, '-')

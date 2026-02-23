@@ -66,6 +66,10 @@ export interface ShipToMainResult {
   prCreated: boolean
 }
 
+export interface MoveLocalChangesResult {
+  moved: boolean
+}
+
 const SNAPSHOT_PREFIX = '[terminator-chat:snapshot]'
 const WINDOWS_RESERVED_BASENAME_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 
@@ -1211,6 +1215,19 @@ export class GitService {
     return { url, created: true }
   }
 
+  private static async findStashRefByMessage(worktreePath: string, message: string): Promise<string | null> {
+    const output = await git(['stash', 'list', '--format=%gd%x09%s'], worktreePath)
+    if (!output) return null
+
+    for (const line of output.split('\n')) {
+      const [ref, subject] = line.split('\t')
+      if (!ref || !subject) continue
+      if (subject === message) return ref
+    }
+
+    return null
+  }
+
   static async shipBranchToMain(repoPath: string, sourceBranch: string): Promise<ShipToMainResult> {
     const source = sourceBranch.trim()
     if (!source) {
@@ -1290,6 +1307,57 @@ export class GitService {
         throw new Error(err.message)
       }
       throw new Error(friendlyGhError(err, `Pushed ${source}, but failed to open pull request`))
+    }
+  }
+
+  static async moveLocalChanges(sourceWorktreePath: string, targetWorktreePath: string): Promise<MoveLocalChangesResult> {
+    if (samePath(sourceWorktreePath, targetWorktreePath)) {
+      return { moved: false }
+    }
+
+    const sourceStatuses = await GitService.getStatus(sourceWorktreePath)
+    if (sourceStatuses.length === 0) {
+      return { moved: false }
+    }
+
+    const [sourceTopLevel, targetTopLevel] = await Promise.all([
+      GitService.getTopLevel(sourceWorktreePath),
+      GitService.getTopLevel(targetWorktreePath),
+    ])
+    if (!samePath(sourceTopLevel, targetTopLevel)) {
+      throw new Error('Cannot move changes across different repositories')
+    }
+
+    const marker = `[terminator-chat:move] ${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    let stashRef: string | null = null
+
+    try {
+      await git(['stash', 'push', '--include-untracked', '--message', marker], sourceWorktreePath)
+      stashRef = await GitService.findStashRefByMessage(sourceWorktreePath, marker)
+      if (!stashRef) {
+        throw new Error('Failed to capture local changes before switching branch')
+      }
+
+      await git(['stash', 'apply', '--index', stashRef], targetWorktreePath)
+      await git(['stash', 'drop', stashRef], targetWorktreePath)
+      return { moved: true }
+    } catch (err) {
+      if (stashRef) {
+        try {
+          const sourceStatusAfterFailure = await GitService.getStatus(sourceWorktreePath)
+          if (sourceStatusAfterFailure.length === 0) {
+            await git(['stash', 'apply', '--index', stashRef], sourceWorktreePath)
+          }
+        } catch {
+          // Keep best effort recovery; we still surface the original move failure.
+        }
+        try {
+          await git(['stash', 'drop', stashRef], sourceWorktreePath)
+        } catch {
+          // Ignore cleanup failures; stash can be recovered manually if needed.
+        }
+      }
+      throw new Error(friendlyGitError(err, 'Failed to move local changes to the new branch workspace'))
     }
   }
 

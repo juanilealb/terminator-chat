@@ -1006,6 +1006,32 @@ export function Sidebar() {
     [setActiveWorkspace],
   );
 
+  const handleDeleteThread = useCallback(
+    (
+      e: React.MouseEvent,
+      payload: { tabId: string; threadName: string },
+    ) => {
+      e.stopPropagation();
+
+      if (e.shiftKey) {
+        removeTab(payload.tabId);
+        return;
+      }
+
+      showConfirmDialog({
+        title: "Delete thread",
+        message: `Delete thread \"${payload.threadName}\"?`,
+        confirmLabel: "Delete",
+        destructive: true,
+        onConfirm: () => {
+          removeTab(payload.tabId);
+          dismissConfirmDialog();
+        },
+      });
+    },
+    [removeTab, showConfirmDialog, dismissConfirmDialog],
+  );
+
   const handleDeleteWorkspace = useCallback(
     (e: React.MouseEvent, ws: { id: string; name: string }) => {
       e.stopPropagation();
@@ -1364,16 +1390,14 @@ export function Sidebar() {
                             {syncBadge.label}
                           </span>
                         )}
-                        <Tooltip label="Delete thread branch">
+                        <Tooltip label="Delete thread">
                           <button
-                            aria-label={`Delete thread branch ${displayName}`}
+                            aria-label={`Delete thread ${displayName}`}
                             className={styles.workspaceDeleteBtn}
-                            onClick={(e) =>
-                              handleDeleteWorkspace(e, {
-                                id: workspace.id,
-                                name: workspace.name,
-                              })
-                            }
+                            onClick={(e) => handleDeleteThread(e, {
+                              tabId: tab.id,
+                              threadName: displayName,
+                            })}
                           >
                             &#x2715;
                           </button>

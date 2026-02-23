@@ -111,6 +111,8 @@ const api = {
       ipcRenderer.invoke(IPC.GIT_RESTORE_SNAPSHOT, worktreePath, ref),
     dropSnapshot: (worktreePath: string, ref: string) =>
       ipcRenderer.invoke(IPC.GIT_DROP_SNAPSHOT, worktreePath, ref),
+    moveLocalChanges: (sourceWorktreePath: string, targetWorktreePath: string) =>
+      ipcRenderer.invoke(IPC.GIT_MOVE_LOCAL_CHANGES, sourceWorktreePath, targetWorktreePath) as Promise<{ moved: boolean }>,
   },
 
   fs: {
@@ -322,6 +324,8 @@ const api = {
       ipcRenderer.invoke(IPC.CHAT_DESTROY_THREAD, threadId),
     resume: (threadId: string) =>
       ipcRenderer.invoke(IPC.CHAT_RESUME, threadId) as Promise<boolean>,
+    saveLocalImage: (bytes: ArrayBuffer, fileName?: string) =>
+      ipcRenderer.invoke(IPC.CHAT_SAVE_LOCAL_IMAGE, bytes, fileName) as Promise<string>,
     onEvent: (callback: (event: ChatEventPayload) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, data: ChatEventPayload) => callback(data)
       ipcRenderer.on(IPC.CHAT_EVENT, listener)

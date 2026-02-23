@@ -1,6 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Textarea,
   Menu,
   MenuTrigger,
@@ -47,9 +53,6 @@ type CommitFlowAction =
   | 'commit'
   | 'commit-push'
   | 'commit-pr'
-  | 'commit-pr-target'
-  | 'ship-main'
-  | 'ship-main-close'
 
 interface CommitFlowOption {
   id: CommitFlowAction
@@ -57,36 +60,25 @@ interface CommitFlowOption {
   tooltip: string
 }
 
+type BranchSwitchMode = 'existing' | 'new'
+
+const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop'])
+
 const COMMIT_FLOW_OPTIONS: CommitFlowOption[] = [
   {
     id: 'commit',
-    label: 'Commit',
-    tooltip: 'Commit changes',
+    label: 'Commit only',
+    tooltip: 'Create commit only',
   },
   {
     id: 'commit-push',
     label: 'Commit and push',
-    tooltip: 'Commit and push current branch',
+    tooltip: 'Create commit and push current branch',
   },
   {
     id: 'commit-pr',
-    label: 'Commit, push and PR',
-    tooltip: 'Commit, push branch, and open or create a pull request',
-  },
-  {
-    id: 'commit-pr-target',
-    label: 'Commit, push and PR to target',
-    tooltip: 'Commit, push branch, and open or create a pull request to a selected base branch',
-  },
-  {
-    id: 'ship-main',
-    label: 'Ship to main',
-    tooltip: 'Commit, push branch, and open a PR to main',
-  },
-  {
-    id: 'ship-main-close',
-    label: 'Ship to main and close workspace',
-    tooltip: 'Commit, push branch, open a PR to main, and close workspace',
+    label: 'Commit and update PR',
+    tooltip: 'Create commit, push branch, and create/update the PR for this branch',
   },
 ]
 
@@ -119,21 +111,41 @@ function normalizeBranchName(input: string): string {
     .replace(/^origin\//, '')
 }
 
+function sanitizeBranchInput(input: string): string {
+  return normalizeBranchName(input)
+    .replace(/\s+/g, '-')
+    .replace(/[\x00-\x1f\x7f~^:?*[\]\\]/g, '')
+    .replace(/\.{2,}/g, '.')
+    .replace(/\/{2,}/g, '/')
+}
+
+function sameWorktreePath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '')
+  return normalize(left) === normalize(right)
+}
+
 export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
   const [files, setFiles] = useState<FileStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [commitMsg, setCommitMsg] = useState('')
   const [commitFlow, setCommitFlow] = useState<CommitFlowAction>('commit')
+  const [allRepoBranches, setAllRepoBranches] = useState<string[]>([])
   const [availableBaseBranches, setAvailableBaseBranches] = useState<string[]>([])
   const [selectedBaseBranch, setSelectedBaseBranch] = useState('')
   const [defaultBaseBranch, setDefaultBaseBranch] = useState('main')
+  const [branchSwitchOpen, setBranchSwitchOpen] = useState(false)
+  const [branchSwitchMode, setBranchSwitchMode] = useState<BranchSwitchMode>('existing')
+  const [branchSwitchTarget, setBranchSwitchTarget] = useState('')
+  const [branchSwitchBase, setBranchSwitchBase] = useState('')
+  const [switchingBranchContext, setSwitchingBranchContext] = useState(false)
   const refreshSeqRef = useRef(0)
   const lastAutofilledCommitMsgRef = useRef<string>('')
   const {
     openDiffTab,
     addToast,
-    deleteWorkspace,
+    setNewThreadDialog,
+    confirmNewThreadDialog,
     workspaces,
     projects,
   } = useAppStore()
@@ -154,6 +166,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
 
   useEffect(() => {
     if (!project) {
+      setAllRepoBranches([])
       setAvailableBaseBranches([])
       setSelectedBaseBranch('')
       setDefaultBaseBranch('main')
@@ -169,11 +182,18 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
       if (cancelled) return
       const currentBranch = normalizeBranchName(currentBranchRaw)
       const normalizedDefault = normalizeBranchName(defaultBranchRaw) || 'main'
-      const uniqueBranches = Array.from(
+      const normalizedBranches = Array.from(
         new Set(
           branches
             .map((entry) => normalizeBranchName(entry))
-            .filter((entry) => !!entry && entry !== currentBranch),
+            .filter((entry) => !!entry),
+        ),
+      )
+      normalizedBranches.sort((a, b) => a.localeCompare(b))
+      const uniqueBranches = Array.from(
+        new Set(
+          normalizedBranches
+            .filter((entry) => entry !== currentBranch),
         ),
       )
       uniqueBranches.sort((a, b) => a.localeCompare(b))
@@ -181,6 +201,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
         uniqueBranches.unshift(normalizedDefault)
       }
 
+      setAllRepoBranches(normalizedBranches)
       setDefaultBaseBranch(normalizedDefault)
       setAvailableBaseBranches(uniqueBranches)
       setSelectedBaseBranch((prev) => {
@@ -284,6 +305,11 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     }
   }, [worktreePath, runGitOp])
 
+  const resolveSelectedPrBaseBranch = useCallback(() => {
+    const base = normalizeBranchName(selectedBaseBranch || '')
+    return base || undefined
+  }, [selectedBaseBranch])
+
   const handleCommitFlow = useCallback(() => {
     const message = commitMsg.trim()
     if (!message) return
@@ -320,64 +346,18 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
         return
       }
 
-      if (commitFlow === 'commit-pr' || commitFlow === 'commit-pr-target') {
+      if (commitFlow === 'commit-pr') {
         const pushed = await window.api.git.pushCurrentBranch(worktreePath)
-        const baseBranch = commitFlow === 'commit-pr-target'
-          ? normalizeBranchName(selectedBaseBranch || defaultBaseBranch)
-          : undefined
-        if (commitFlow === 'commit-pr-target' && !baseBranch) {
-          throw new Error('Select a target branch for the PR')
-        }
+        const baseBranch = resolveSelectedPrBaseBranch()
         const pr = await window.api.git.openOrCreatePr(worktreePath, baseBranch)
         addToast({
           id: crypto.randomUUID(),
           message: pr.created
             ? `Committed, pushed ${pushed.branch}, and created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
-            : `Committed, pushed ${pushed.branch}, and opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
+            : `Committed, pushed ${pushed.branch}, and updated existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
           type: 'info',
         })
         window.open(pr.url)
-        lastAutofilledCommitMsgRef.current = defaultCommitPrefix
-        setCommitMsg(defaultCommitPrefix)
-        return
-      }
-
-      if (commitFlow === 'ship-main' || commitFlow === 'ship-main-close') {
-        if (!project) {
-          throw new Error('Project not found for this workspace')
-        }
-        const sourceBranch = await window.api.git.getCurrentBranch(worktreePath)
-        if (!sourceBranch || sourceBranch === 'HEAD') {
-          throw new Error('Cannot ship workspace from detached HEAD')
-        }
-        const closesWorkspace = commitFlow === 'ship-main-close'
-        const result = await window.api.git.shipBranchToMain(project.repoPath, sourceBranch)
-
-        if (result.prUrl) {
-          const prMsg = result.prCreated
-            ? `PR to ${result.mainBranch} created.`
-            : `PR to ${result.mainBranch} already exists.`
-          addToast({
-            id: crypto.randomUUID(),
-            message: closesWorkspace
-              ? `Pushed ${sourceBranch}, and closed workspace. ${prMsg}`
-              : `Pushed ${sourceBranch}. ${prMsg}`,
-            type: 'info',
-          })
-          window.open(result.prUrl)
-        } else {
-          addToast({
-            id: crypto.randomUUID(),
-            message: closesWorkspace
-              ? `Pushed ${sourceBranch} and closed workspace.`
-              : `Pushed ${sourceBranch}.`,
-            type: 'info',
-          })
-        }
-
-        if (closesWorkspace) {
-          await deleteWorkspace(workspaceId)
-        }
         lastAutofilledCommitMsgRef.current = defaultCommitPrefix
         setCommitMsg(defaultCommitPrefix)
         return
@@ -395,18 +375,9 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
     worktreePath,
     commitFlow,
     defaultCommitPrefix,
-    project,
-    selectedBaseBranch,
-    defaultBaseBranch,
-    deleteWorkspace,
-    workspaceId,
+    resolveSelectedPrBaseBranch,
     addToast,
   ])
-
-  const resolveSelectedPrBaseBranch = useCallback(() => {
-    const base = normalizeBranchName(selectedBaseBranch || '')
-    return base || undefined
-  }, [selectedBaseBranch])
 
   const handlePushBranch = useCallback(() => {
     void runGitOp(async () => {
@@ -446,10 +417,10 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
         message: pushFirst
           ? pr.created
             ? `Pushed ${pushedBranch ?? pr.branch} and created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
-            : `Pushed ${pushedBranch ?? pr.branch} and opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`
+            : `Pushed ${pushedBranch ?? pr.branch} and updated existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`
           : pr.created
             ? `Created PR${baseBranch ? ` to ${baseBranch}` : ''}.`
-            : `Opened existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
+            : `Updated existing PR${baseBranch ? ` to ${baseBranch}` : ''}.`,
         type: 'info',
       })
       window.open(pr.url)
@@ -459,6 +430,89 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
   const handleCommitFlowSelect = useCallback((flow: CommitFlowAction) => {
     setCommitFlow(flow)
   }, [])
+
+  const handleOpenBranchSwitch = useCallback(() => {
+    const currentBranch = normalizeBranchName(workspace?.branch ?? '')
+    const defaultMode: BranchSwitchMode = PROTECTED_BRANCHES.has(currentBranch) ? 'new' : 'existing'
+    setBranchSwitchMode(defaultMode)
+    setBranchSwitchTarget(defaultMode === 'existing' ? (availableBaseBranches[0] ?? '') : '')
+    setBranchSwitchBase(currentBranch || defaultBaseBranch || 'main')
+    setBranchSwitchOpen(true)
+  }, [workspace?.branch, availableBaseBranches, defaultBaseBranch])
+
+  const handleSwitchBranchContext = useCallback(async () => {
+    if (!project) {
+      addToast({ id: crypto.randomUUID(), message: 'Project not found for this workspace', type: 'error' })
+      return
+    }
+
+    const currentBranch = normalizeBranchName(workspace?.branch ?? '')
+    const targetBranch = normalizeBranchName(branchSwitchTarget)
+    if (!targetBranch) {
+      addToast({ id: crypto.randomUUID(), message: 'Branch is required', type: 'error' })
+      return
+    }
+    if (targetBranch === currentBranch) {
+      setBranchSwitchOpen(false)
+      return
+    }
+
+    const resolvedBaseBranch = normalizeBranchName(branchSwitchBase || currentBranch || defaultBaseBranch) || 'main'
+    const sourceWorktreePath = worktreePath
+
+    setSwitchingBranchContext(true)
+    try {
+      const sourceStatuses = await window.api.git.getStatus(sourceWorktreePath).catch(() => [] as FileStatus[])
+      const sourceHadLocalChanges = sourceStatuses.length > 0
+
+      setNewThreadDialog({
+        open: false,
+        projectId: project.id,
+        mode: branchSwitchMode,
+        branch: targetBranch,
+        baseBranch: resolvedBaseBranch,
+      })
+      await confirmNewThreadDialog()
+
+      const latest = useAppStore.getState()
+      const activeWorkspace = latest.workspaces.find((entry) => entry.id === latest.activeWorkspaceId)
+      if (activeWorkspace && normalizeBranchName(activeWorkspace.branch) === targetBranch) {
+        let movedChanges = false
+        if (sourceHadLocalChanges && !sameWorktreePath(sourceWorktreePath, activeWorkspace.worktreePath)) {
+          const moved = await window.api.git.moveLocalChanges(sourceWorktreePath, activeWorkspace.worktreePath)
+          movedChanges = moved.moved
+        }
+
+        addToast({
+          id: crypto.randomUUID(),
+          message: movedChanges
+            ? `Switched context to ${targetBranch} and moved local changes.`
+            : `Switched context to ${targetBranch}.`,
+          type: 'info',
+        })
+        setBranchSwitchOpen(false)
+      }
+    } catch (err) {
+      addToast({
+        id: crypto.randomUUID(),
+        message: formatUserError(err, 'Failed to switch branch context'),
+        type: 'error',
+      })
+    } finally {
+      setSwitchingBranchContext(false)
+    }
+  }, [
+    project,
+    workspace?.branch,
+    branchSwitchTarget,
+    branchSwitchBase,
+    defaultBaseBranch,
+    branchSwitchMode,
+    worktreePath,
+    setNewThreadDialog,
+    confirmNewThreadDialog,
+    addToast,
+  ])
 
   const openDiff = useCallback((path: string) => {
     openDiffTab(workspaceId)
@@ -483,15 +537,18 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
   }
 
   const commitFlowOption = COMMIT_FLOW_OPTIONS.find((option) => option.id === commitFlow) ?? COMMIT_FLOW_OPTIONS[0]
-  const needsTargetBranch = commitFlow === 'commit-pr-target'
-  const canSelectTargetBranch = availableBaseBranches.length > 0
   const selectedPrBaseLabel = resolveSelectedPrBaseBranch() ?? 'repository default'
   const canCommit =
     !busy &&
     !!commitMsg.trim() &&
-    (staged.length > 0 || unstaged.length > 0) &&
-    (!needsTargetBranch || !!selectedBaseBranch)
+    (staged.length > 0 || unstaged.length > 0)
   const branchDisplayName = normalizeBranchName(workspace?.branch ?? '') || 'detached'
+  const isProtectedBranch = PROTECTED_BRANCHES.has(branchDisplayName)
+  const branchSwitchListId = `branch-switch-list-${workspaceId}`
+  const branchSwitchBusy = busy || switchingBranchContext
+  const canSubmitBranchSwitch = branchSwitchTarget.trim().length > 0 && (
+    branchSwitchMode === 'existing' || !!normalizeBranchName(branchSwitchBase)
+  )
 
   return (
     <div className={styles.changedFilesList}>
@@ -524,7 +581,7 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
             onClick={handlePushBranch}
             title={`Push current branch (${branchDisplayName}) to origin`}
           >
-            Push to origin
+            Push branch
           </Button>
           <Button
             appearance="secondary"
@@ -540,25 +597,127 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
             size="small"
             disabled={busy}
             onClick={() => handleOpenOrCreatePr(false)}
-            title={`Open or create PR from ${branchDisplayName} to ${selectedPrBaseLabel}`}
+            title={`Open or update PR from ${branchDisplayName} to ${selectedPrBaseLabel}`}
           >
-            Open or create PR
+            Open or update PR
           </Button>
           <Button
             appearance="primary"
             size="small"
             disabled={busy}
             onClick={() => handleOpenOrCreatePr(true)}
-            title={`Push ${branchDisplayName} and open or create PR to ${selectedPrBaseLabel}`}
+            title={`Push ${branchDisplayName} and open or update PR to ${selectedPrBaseLabel}`}
           >
-            Push + open PR
+            Push + update PR
+          </Button>
+          <Button
+            appearance="outline"
+            size="small"
+            disabled={branchSwitchBusy}
+            onClick={handleOpenBranchSwitch}
+            title="Switch to another branch context (creates/reuses workspace)"
+          >
+            {isProtectedBranch ? 'Move off protected branch' : 'Move to another branch'}
           </Button>
         </div>
+        {isProtectedBranch && (
+          <div className={styles.branchProtectionHint}>
+            This thread is on <span className={styles.branchActionsHintValue}>{branchDisplayName}</span>. Use a feature branch before opening a PR to <span className={styles.branchActionsHintValue}>{branchDisplayName}</span>.
+          </div>
+        )}
         <div className={styles.branchActionsHint}>
           Source branch <span className={styles.branchActionsHintValue}>{branchDisplayName}</span> to base{' '}
           <span className={styles.branchActionsHintValue}>{selectedPrBaseLabel}</span>
         </div>
       </div>
+
+      <Dialog
+        open={branchSwitchOpen}
+        onOpenChange={(_, data) => {
+          if (!data.open && !switchingBranchContext) setBranchSwitchOpen(false)
+        }}
+      >
+        <DialogSurface className={styles.branchSwitchSurface}>
+          <DialogBody>
+            <DialogTitle>Move branch context</DialogTitle>
+            <DialogContent className={styles.branchSwitchContent}>
+              <div className={styles.branchSwitchModeToggle}>
+                <button
+                  type="button"
+                  className={`${styles.branchSwitchModeButton} ${branchSwitchMode === 'existing' ? styles.branchSwitchModeButtonActive : ''}`}
+                  onClick={() => setBranchSwitchMode('existing')}
+                  disabled={branchSwitchBusy}
+                >
+                  Use existing branch
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.branchSwitchModeButton} ${branchSwitchMode === 'new' ? styles.branchSwitchModeButtonActive : ''}`}
+                  onClick={() => setBranchSwitchMode('new')}
+                  disabled={branchSwitchBusy}
+                >
+                  Create new branch
+                </button>
+              </div>
+
+              <label className={styles.branchSwitchLabel}>Branch</label>
+              <input
+                className={styles.branchSwitchInput}
+                value={branchSwitchTarget}
+                onChange={(event) => setBranchSwitchTarget(sanitizeBranchInput(event.target.value))}
+                placeholder={branchSwitchMode === 'new' ? 'feature/my-change' : 'develop'}
+                list={branchSwitchListId}
+                disabled={branchSwitchBusy}
+              />
+              <datalist id={branchSwitchListId}>
+                {allRepoBranches.map((branch) => (
+                  <option key={branch} value={branch} />
+                ))}
+              </datalist>
+
+              {branchSwitchMode === 'new' && (
+                <>
+                  <label className={styles.branchSwitchLabel}>Base branch</label>
+                  <input
+                    className={styles.branchSwitchInput}
+                    value={branchSwitchBase}
+                    onChange={(event) => setBranchSwitchBase(sanitizeBranchInput(event.target.value))}
+                    placeholder="develop"
+                    list={branchSwitchListId}
+                    disabled={branchSwitchBusy}
+                  />
+                </>
+              )}
+
+              <div className={styles.branchSwitchHint}>
+                {branchSwitchMode === 'new'
+                  ? 'Creates an isolated worktree from the selected base branch, moves this thread there, and carries local tracked/untracked changes.'
+                  : 'Reuses or creates a worktree for the selected branch, moves this thread there, and carries local tracked/untracked changes.'}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                onClick={() => setBranchSwitchOpen(false)}
+                disabled={branchSwitchBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={() => { void handleSwitchBranchContext() }}
+                disabled={!canSubmitBranchSwitch || branchSwitchBusy}
+              >
+                {switchingBranchContext
+                  ? 'Switching...'
+                  : branchSwitchMode === 'new'
+                    ? 'Create and switch'
+                    : 'Switch branch'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
 
       {/* Commit input */}
       {hasChanges && (
@@ -614,27 +773,6 @@ export function ChangedFiles({ worktreePath, workspaceId, isActive }: Props) {
               </MenuPopover>
             </Menu>
           </div>
-          {needsTargetBranch && (
-            <div className={styles.flowDetailRow}>
-              <span className={styles.flowDetailLabel}>PR base</span>
-              <select
-                className={styles.flowSelect}
-                value={selectedBaseBranch}
-                onChange={(event) => setSelectedBaseBranch(normalizeBranchName(event.target.value))}
-                disabled={busy || !canSelectTargetBranch}
-              >
-                {canSelectTargetBranch ? (
-                  availableBaseBranches.map((branch) => (
-                    <option key={branch} value={branch}>
-                      {branch}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No origin branches available</option>
-                )}
-              </select>
-            </div>
-          )}
         </div>
       )}
 

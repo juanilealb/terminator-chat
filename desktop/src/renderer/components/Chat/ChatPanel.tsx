@@ -3282,15 +3282,41 @@ export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = fals
   }, [])
 
   // Image attachment helpers
-  const addImageFiles = useCallback((files: FileList | File[]) => {
+  const addImageFiles = useCallback(async (files: FileList | File[]) => {
     const imageFiles = Array.from(files).filter((f) => f.type.startsWith('image/'))
-    const newImages: AttachedImage[] = imageFiles.map((f) => ({
-      path: (f as any).path || f.name,
-      name: f.name,
-      previewUrl: URL.createObjectURL(f),
-    }))
-    setAttachedImages((prev) => [...prev, ...newImages])
-  }, [])
+    if (imageFiles.length === 0) return
+
+    const nextImages: AttachedImage[] = []
+    for (const file of imageFiles) {
+      const previewUrl = URL.createObjectURL(file)
+      try {
+        const maybePath = typeof (file as { path?: unknown }).path === 'string'
+          ? ((file as { path?: string }).path ?? '').trim()
+          : ''
+        const localPath = maybePath
+          || await window.api.chat.saveLocalImage(await file.arrayBuffer(), file.name)
+        if (!localPath) {
+          throw new Error(`Failed to resolve local path for image "${file.name}"`)
+        }
+        nextImages.push({
+          path: localPath,
+          name: file.name,
+          previewUrl,
+        })
+      } catch (err) {
+        URL.revokeObjectURL(previewUrl)
+        addToast({
+          id: crypto.randomUUID(),
+          message: formatUserError(err, `Failed to attach image "${file.name}"`),
+          type: 'error',
+        })
+      }
+    }
+
+    if (nextImages.length > 0) {
+      setAttachedImages((prev) => [...prev, ...nextImages])
+    }
+  }, [addToast])
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -3318,7 +3344,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = fals
     e.stopPropagation()
     setIsDragging(false)
     if (e.dataTransfer.files.length > 0) {
-      addImageFiles(e.dataTransfer.files)
+      void addImageFiles(e.dataTransfer.files)
     }
   }, [addImageFiles])
 
@@ -3489,7 +3515,7 @@ export function ChatPanel({ threadId, workspaceId, worktreePath, isActive = fals
 
   const handleFileSelected = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      addImageFiles(e.target.files)
+      void addImageFiles(e.target.files)
     }
     e.target.value = ''
   }, [addImageFiles])

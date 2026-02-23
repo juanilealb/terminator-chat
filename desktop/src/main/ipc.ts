@@ -1,5 +1,5 @@
 import { ipcMain, dialog, app, BrowserWindow, clipboard, webContents, powerSaveBlocker } from 'electron'
-import { join, relative, basename } from 'path'
+import { join, relative, basename, extname } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -513,6 +513,12 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
   ipcMain.handle(IPC.GIT_DROP_SNAPSHOT, async (_e, worktreePath: string, ref: string) => {
     return runGitOperation('drop-snapshot', { worktreePath, ref }, () =>
       GitService.dropSnapshot(worktreePath, ref),
+    )
+  })
+
+  ipcMain.handle(IPC.GIT_MOVE_LOCAL_CHANGES, async (_e, sourceWorktreePath: string, targetWorktreePath: string) => {
+    return runGitOperation('move-local-changes', { sourceWorktreePath, targetWorktreePath }, () =>
+      GitService.moveLocalChanges(sourceWorktreePath, targetWorktreePath),
     )
   })
 
@@ -1458,6 +1464,28 @@ export function registerIpcHandlers(options: IpcHandlerOptions = {}): void {
 
   ipcMain.handle(IPC.CHAT_RESUME, async (_e, threadId: string) => {
     return codexService.resumeThread(threadId)
+  })
+
+  ipcMain.handle(IPC.CHAT_SAVE_LOCAL_IMAGE, async (_e, bytes: unknown, fileName?: string) => {
+    let buffer: Buffer | null = null
+    if (bytes instanceof ArrayBuffer) {
+      buffer = Buffer.from(bytes)
+    } else if (ArrayBuffer.isView(bytes)) {
+      buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    }
+    if (!buffer || buffer.byteLength === 0) {
+      throw new Error('Image data is empty')
+    }
+
+    const rawExt = extname((fileName ?? '').trim()).toLowerCase()
+    const ext = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff']
+      .includes(rawExt)
+      ? rawExt
+      : '.png'
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const filePath = join(tmpdir(), `terminator-chat-upload-${suffix}${ext}`)
+    await writeFile(filePath, buffer)
+    return filePath
   })
 }
 
